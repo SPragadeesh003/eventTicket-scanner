@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit;
 public class ReconnectionManager {
     private static final String TAG = "ReconnectionMgr";
     private static final int MAX_RETRIES = 5;
-    private static final long INITIAL_BACKOFF = 1000; // 1 second
+    private static final long INITIAL_BACKOFF = 500; // 0.5 seconds (faster retry)
     
     private final Context context;
     private final ReconnectionListener listener;

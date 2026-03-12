@@ -408,7 +408,11 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         }).addOnFailureListener(e -> {
             if (!isModuleDestroyed) {
                 Log.e(TAG, "❌ Advertising failed: " + e.getMessage());
-                emitDebug("Advertising failed: " + e.getMessage());
+                emitDebug("Advertising failed: " + e.getMessage() + ". Retrying in 2s...");
+                // ✨ RETRY LOGIC
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                    if (!isModuleDestroyed) startAdvertising(deviceName);
+                }, 2000);
             }
         });
     }
@@ -438,7 +442,11 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         }).addOnFailureListener(e -> {
             if (!isModuleDestroyed) {
                 Log.e(TAG, "❌ Discovery failed: " + e.getMessage());
-                emitDebug("Discovery failed: " + e.getMessage());
+                emitDebug("Discovery failed: " + e.getMessage() + ". Retrying in 2s...");
+                // ✨ RETRY LOGIC
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                    if (!isModuleDestroyed) startDiscovery();
+                }, 2000);
             }
         });
     }

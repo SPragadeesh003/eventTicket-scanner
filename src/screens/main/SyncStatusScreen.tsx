@@ -147,7 +147,7 @@ export default function SyncStatusScreen() {
     return () => {
       mountedRef.current = false;
       unsubNet();
-      nearbyStop(); // Cleanup native service
+      // nearbyStop(); // ✨ REMOVED: Keep mesh active in background for persistence
     };
   }, []);
 
