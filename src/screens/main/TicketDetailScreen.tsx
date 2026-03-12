@@ -163,7 +163,7 @@ export default function TicketDetailScreen() {
             setScanInfo({ scanned_at: now, device_name: `Gate-${deviceId.slice(-4).toUpperCase()}` });
 
             // Broadcast manual validation to all nearby peers
-            await broadcastScan(ticketId, eventId, deviceId);
+            await broadcastScan(ticketId, eventId);
           },
         },
       ]

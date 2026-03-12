@@ -12,8 +12,9 @@ import java.util.concurrent.TimeUnit;
 
 public class ReconnectionManager {
     private static final String TAG          = "ReconnectionMgr";
-    private static final int    MAX_RETRIES  = 5;
-    private static final long   INITIAL_BACKOFF = 500; // 0.5s, then 1s, 2s, 4s, 8s
+    private static final int    MAX_RETRIES     = 8;    // more attempts before handing off to discovery restart
+    private static final long   INITIAL_BACKOFF = 500;  // 0.5s, 1s, 2s, 4s, 8s, 10s, 10s, 10s
+    private static final long   MAX_BACKOFF     = 10_000; // cap at 10s -- no huge gaps
 
     private final Context context;
     private final ReconnectionListener listener;
@@ -68,7 +69,7 @@ public class ReconnectionManager {
             return;
         }
 
-        long backoffMs = INITIAL_BACKOFF * (long) Math.pow(2, attempt.retryCount);
+        long backoffMs = Math.min(MAX_BACKOFF, INITIAL_BACKOFF * (long) Math.pow(2, attempt.retryCount));
         attempt.retryCount++;
         reconnectAttempts.put(endpointId, attempt);
 

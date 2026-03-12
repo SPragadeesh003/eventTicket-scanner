@@ -129,10 +129,15 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onReconnectFailed(String endpointId) {
                     if (!isModuleDestroyed) {
-                        Log.e(TAG, "❌ All reconnection attempts failed: " + endpointId);
-                        // Clean up name cache for permanently lost peer
-                        endpointNameCache.remove(endpointId);
-                        emitStatus("reconnect_failed_" + endpointId);
+                        String name = endpointNameCache.getOrDefault(endpointId, endpointId);
+                        Log.w(TAG, "Reconnect attempts exhausted for: " + name + " (" + endpointId + ")");
+                        Log.w(TAG, "Restarting discovery -- peer will be rediscovered with a new endpointId");
+                        // Do NOT remove from endpointNameCache -- peer name still valid.
+                        // Nearby will assign a fresh endpointId on rediscovery,
+                        // triggering onEndpointFound which resets retry state automatically.
+                        emitStatus("reconnect_failed_" + name);
+                        // Restart discovery so the peer can be rediscovered
+                        startDiscoveryInternal();
                     }
                 }
             }
@@ -458,28 +463,32 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             found.putString("deviceName", remoteName);
             emit(EVENT_DEVICE_FOUND, found);
 
-            // Skip if already connected (purge stale state first)
+            // Already connected -- nothing to do
             if (connectedEndpoints.containsKey(endpointId)) {
-                Log.w(TAG, "⚠️ Already connected to " + remoteName + ", purging stale state");
-                connectedEndpoints.remove(endpointId);
-                heartbeatManager.stopHeartbeatForEndpoint(endpointId);
-            }
-
-            // Skip if already connecting — FIX #3: no synchronized block needed
-            if (connectingEndpoints.contains(endpointId)) {
-                Log.w(TAG, "⚠️ Already connecting to: " + remoteName);
+                Log.d(TAG, "Already connected to " + remoteName + " -- skipping");
                 return;
             }
 
-            // Tie-breaker: lexicographically greater name initiates connection
-            // Prevents both devices simultaneously calling requestConnection to each other
-            if (localDeviceName != null && localDeviceName.compareTo(remoteName) > 0) {
-                connectingEndpoints.add(endpointId);
-                Log.d(TAG, "⚖️ I am greater (" + localDeviceName + " > " + remoteName + "). Initiating.");
-                requestConnectionInternal(endpointId, remoteName);
-            } else {
-                Log.d(TAG, "⚖️ Waiting for " + remoteName + " to connect to me.");
+            // Already connecting to this exact endpointId
+            if (connectingEndpoints.contains(endpointId)) {
+                Log.w(TAG, "Already connecting to: " + remoteName + " (" + endpointId + ")");
+                return;
             }
+
+            // FIX: Peer was rediscovered after disconnect.
+            // Nearby assigns a NEW endpointId on every rediscovery.
+            // Old reconnection attempts (keyed by old endpointId) are now useless.
+            // Reset so a fresh connection attempt can proceed immediately.
+            if (managersInitialized) {
+                reconnectionManager.clearAttempts(endpointId);
+            }
+
+            // FIX: Both sides always initiate -- no tie-breaker.
+            // Nearby handles simultaneous requestConnection calls gracefully
+            // via STATUS_ALREADY_CONNECTED_TO_ENDPOINT (handled in failure listener).
+            Log.d(TAG, "Initiating connection to: " + remoteName + " (" + endpointId + ")");
+            connectingEndpoints.add(endpointId);
+            requestConnectionInternal(endpointId, remoteName);
         }
 
         @Override
@@ -573,22 +582,35 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         }
 
         try {
-            byte[]  bytes   = jsonPayload.getBytes(StandardCharsets.UTF_8);
-            Payload payload = Payload.fromBytes(bytes);
+            byte[] bytes = jsonPayload.getBytes(StandardCharsets.UTF_8);
 
-            Log.d(TAG, "📤 Broadcasting to " + connectedEndpoints.size() + " devices");
+            Log.d(TAG, "📤 Broadcasting to " + connectedEndpoints.size() + " device(s)");
+            Log.d(TAG, "📤 Payload size: " + bytes.length + " bytes");
+
+            int successCount = 0;
+            int failCount    = 0;
 
             for (Map.Entry<String, String> entry : connectedEndpoints.entrySet()) {
                 try {
-                    connectionsClient.sendPayload(entry.getKey(), payload);
-                    Log.d(TAG, "   ✅ Sent to: " + entry.getValue());
+                    // ✅ FIX: Create a FRESH Payload instance per endpoint.
+                    // Nearby internally tracks Payload objects by ID.
+                    // Reusing the same Payload across multiple sendPayload() calls
+                    // causes every call after the first to be silently dropped —
+                    // Nearby sees "already sent this payload ID" and ignores it.
+                    Payload freshPayload = Payload.fromBytes(bytes);
+                    connectionsClient.sendPayload(entry.getKey(), freshPayload);
+                    Log.d(TAG, "   ✅ Sent to: " + entry.getValue() + " (" + entry.getKey() + ")");
+                    successCount++;
                 } catch (Exception e) {
-                    Log.w(TAG, "   ❌ Failed to send to " + entry.getValue() + ": " + e.getMessage());
+                    Log.w(TAG, "   ❌ Failed: " + entry.getValue() + " — " + e.getMessage());
+                    failCount++;
                 }
             }
-            promise.resolve(true);
+
+            Log.d(TAG, "📤 Broadcast done — ✅ " + successCount + " sent, ❌ " + failCount + " failed");
+            promise.resolve(successCount > 0);
         } catch (Exception e) {
-            Log.e(TAG, "❌ broadcast error: " + e.getMessage(), e);
+            Log.e(TAG, "❌ Broadcast error: " + e.getMessage(), e);
             promise.reject("BROADCAST_ERROR", e.getMessage());
         }
     }

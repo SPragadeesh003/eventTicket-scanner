@@ -6,7 +6,6 @@ import com.google.android.gms.nearby.Nearby;
 import com.google.android.gms.nearby.connection.Payload;
 
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -15,28 +14,36 @@ import java.util.concurrent.TimeUnit;
 
 public class HeartbeatManager {
     private static final String TAG = "HeartbeatManager";
-    private static final long HEARTBEAT_INTERVAL = 15000; // 15 seconds
-    private static final long HEARTBEAT_TIMEOUT  = 45000; // 45 seconds
-    // NOTE: Timeout must be > 2x interval to avoid false positives
-    // (one missed heartbeat is acceptable; two consecutive means dead peer)
+
+    // ── Timing constants ──────────────────────────────────────────────────────
+    // Interval: how often we send a heartbeat ping
+    private static final long HEARTBEAT_INTERVAL = 10_000; // 10 seconds
+
+    // Tolerance: how many intervals we allow before declaring timeout
+    // With interval=10s and tolerance=3 → timeout after ~30s of silence
+    // Previously was 30s timeout with 15s interval = 2 missed beats → too aggressive
+    // Now: 3 missed beats required → much more tolerant of brief BLE hiccups
+    private static final int  MISSED_BEATS_BEFORE_TIMEOUT = 3;
+    private static final long HEARTBEAT_TIMEOUT =
+        HEARTBEAT_INTERVAL * MISSED_BEATS_BEFORE_TIMEOUT; // 30 seconds
 
     private final Context context;
     private final HeartbeatListener listener;
+    private final Map<String, String> connectedEndpoints; // injected from module
 
-    // FIX #4: Reference to live connected set from NearbyConnectionsModule
-    // Used to guard against sending heartbeats to already-disconnected peers
-    private final Map<String, String> connectedEndpoints;
+    // Track last received heartbeat time per endpoint
+    private final Map<String, Long>    lastHeartbeatTime  = new ConcurrentHashMap<>();
+    // Track consecutive missed beats per endpoint (for gradual escalation)
+    private final Map<String, Integer> missedBeatsCount   = new ConcurrentHashMap<>();
 
-    private final Map<String, Long> lastHeartbeatTime = new ConcurrentHashMap<>();
-    private ScheduledFuture<?> monitorTask;
+    private ScheduledFuture<?>       monitorTask;
     private ScheduledExecutorService executor;
-    private volatile boolean isShutdown = false;
+    private volatile boolean         isShutdown = false;
 
     public interface HeartbeatListener {
         void onHeartbeatTimeout(String endpointId);
     }
 
-    // FIX #4: Accept connectedEndpoints from module so we can guard dead-peer sends
     public HeartbeatManager(Context context,
                              Map<String, String> connectedEndpoints,
                              HeartbeatListener listener) {
@@ -47,13 +54,12 @@ public class HeartbeatManager {
 
     public void startHeartbeat() {
         if (isShutdown) {
-            Log.w(TAG, "Cannot start heartbeat — manager is shutdown");
-            return;
+            Log.w(TAG, "Was shutdown — recreating executor");
         }
 
-        // Create fresh executor (FIX #7 pattern applied here too)
         if (executor == null || executor.isShutdown()) {
             executor = Executors.newScheduledThreadPool(1);
+            isShutdown = false;
         }
 
         if (monitorTask != null && !monitorTask.isDone()) {
@@ -67,44 +73,61 @@ public class HeartbeatManager {
 
             for (String endpointId : lastHeartbeatTime.keySet()) {
 
-                // FIX #4: Skip peers that are no longer connected
-                // Prevents sending heartbeat bytes to dead endpoints
+                // Guard: skip peers no longer in connected set
                 if (!connectedEndpoints.containsKey(endpointId)) {
-                    Log.d(TAG, "Skipping heartbeat for disconnected peer: " + endpointId);
                     lastHeartbeatTime.remove(endpointId);
+                    missedBeatsCount.remove(endpointId);
                     continue;
                 }
 
-                long timeSinceLast = now - lastHeartbeatTime.getOrDefault(endpointId, now);
+                long lastBeat     = lastHeartbeatTime.getOrDefault(endpointId, now);
+                long timeSinceLast = now - lastBeat;
 
                 if (timeSinceLast > HEARTBEAT_TIMEOUT) {
-                    Log.w(TAG, "HEARTBEAT TIMEOUT: " + endpointId + " (" + timeSinceLast + "ms since last)");
-                    lastHeartbeatTime.remove(endpointId);
-                    listener.onHeartbeatTimeout(endpointId);
+                    // ── Escalate missed beat count ───────────────────────────
+                    int missed = missedBeatsCount.getOrDefault(endpointId, 0) + 1;
+                    missedBeatsCount.put(endpointId, missed);
+
+                    Log.w(TAG, "Missed beat #" + missed + " for: " + endpointId
+                        + " (" + timeSinceLast + "ms since last)");
+
+                    if (missed >= MISSED_BEATS_BEFORE_TIMEOUT) {
+                        // Only NOW declare timeout after N consecutive misses
+                        Log.e(TAG, "HEARTBEAT TIMEOUT after " + missed
+                            + " missed beats: " + endpointId);
+                        lastHeartbeatTime.remove(endpointId);
+                        missedBeatsCount.remove(endpointId);
+                        listener.onHeartbeatTimeout(endpointId);
+                    }
                 } else {
+                    // Received recently — reset missed count and send next beat
+                    missedBeatsCount.put(endpointId, 0);
                     sendHeartbeat(endpointId);
                 }
             }
         }, HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL, TimeUnit.MILLISECONDS);
 
-        Log.d(TAG, "Heartbeat monitor started (interval=" + HEARTBEAT_INTERVAL + "ms, timeout=" + HEARTBEAT_TIMEOUT + "ms)");
+        Log.d(TAG, "Heartbeat started — interval=" + HEARTBEAT_INTERVAL
+            + "ms, timeout after " + MISSED_BEATS_BEFORE_TIMEOUT + " missed beats");
     }
 
     public void startHeartbeatForEndpoint(String endpointId) {
         if (isShutdown) return;
-        Log.d(TAG, "Tracking heartbeat for: " + endpointId);
         lastHeartbeatTime.put(endpointId, System.currentTimeMillis());
+        missedBeatsCount.put(endpointId, 0);
+        Log.d(TAG, "Tracking heartbeat for: " + endpointId);
     }
 
     public void stopHeartbeatForEndpoint(String endpointId) {
-        Log.d(TAG, "Stopped heartbeat tracking for: " + endpointId);
         lastHeartbeatTime.remove(endpointId);
+        missedBeatsCount.remove(endpointId);
+        Log.d(TAG, "Stopped heartbeat for: " + endpointId);
     }
 
     public void recordHeartbeatReceived(String endpointId) {
-        // Only update if we're still tracking this endpoint
         if (lastHeartbeatTime.containsKey(endpointId)) {
             lastHeartbeatTime.put(endpointId, System.currentTimeMillis());
+            missedBeatsCount.put(endpointId, 0); // reset on any received beat
         }
     }
 
@@ -113,7 +136,8 @@ public class HeartbeatManager {
             Nearby.getConnectionsClient(context)
                 .sendPayload(endpointId, Payload.fromBytes(new byte[]{0x00}));
         } catch (Exception e) {
-            Log.e(TAG, "Heartbeat send failed for " + endpointId + ": " + e.getMessage());
+            Log.w(TAG, "Heartbeat send failed for " + endpointId + ": " + e.getMessage());
+            // Don't disconnect here — let the missed beat counter handle it
         }
     }
 
@@ -139,6 +163,6 @@ public class HeartbeatManager {
         }
 
         lastHeartbeatTime.clear();
-        // NOTE: beatTasks removed — was dead code (FIX #11)
+        missedBeatsCount.clear();
     }
 }

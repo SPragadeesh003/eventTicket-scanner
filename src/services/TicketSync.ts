@@ -71,7 +71,7 @@ export async function syncEventTickets(
 
   // 2. Clear existing local tickets for this event
   const ticketsCol = database.get<Ticket>('tickets');
-  
+
   await database.write(async () => {
     await ticketsCol.query(Q.where('event_id', eventId)).destroyAllPermanently();
   });
@@ -102,7 +102,7 @@ export async function syncEventTickets(
           t._setRaw('synced_at',   now);
         })
       );
-      
+
       // Batch in chunks of 500 to avoid stack limits
       for (let i = 0; i < creations.length; i += 500) {
         await database.batch(...creations.slice(i, i + 500));
@@ -166,10 +166,19 @@ export async function getLocalEventStats(
       ticketsCol.query(Q.where('event_id', eventId), Q.where('ticket_type', 'guest_list')).fetchCount(),
       ticketsCol.query(Q.where('event_id', eventId), Q.where('ticket_type', 'external')).fetchCount(),
       ticketsCol.query(Q.where('event_id', eventId), Q.where('status', 'used')).fetchCount(),
-      ticketsCol.query(Q.where('event_id', eventId), Q.where('ticket_type', 'regular'), Q.where('status', 'used')).fetchCount(),
+      ticketsCol.query(Q.where('event_id', eventId), Q.where('ticket_type', 'regular'),    Q.where('status', 'used')).fetchCount(),
       ticketsCol.query(Q.where('event_id', eventId), Q.where('ticket_type', 'guest_list'), Q.where('status', 'used')).fetchCount(),
-      ticketsCol.query(Q.where('event_id', eventId), Q.where('ticket_type', 'external'), Q.where('status', 'used')).fetchCount(),
-      scanLogsCol.query(Q.where('event_id', eventId), Q.where('device_id', deviceId)).fetchCount(),
+      ticketsCol.query(Q.where('event_id', eventId), Q.where('ticket_type', 'external'),   Q.where('status', 'used')).fetchCount(),
+
+      // ✅ FIX: only count real first scans by this device
+      // Previously counted ALL scan_log rows including is_duplicate: true,
+      // causing the count to inflate every time a used ticket was scanned again.
+      scanLogsCol.query(
+        Q.where('event_id',     eventId),
+        Q.where('device_id',    deviceId),
+        Q.where('is_duplicate', false),
+      ).fetchCount(),
+
       getLastSyncTime(eventId),
     ]);
 
@@ -205,8 +214,8 @@ export async function getLocalEventStats(
 export function formatLastSync(epochMs: number | null): string {
   if (!epochMs) return 'Never';
   const secs = Math.floor((Date.now() - epochMs) / 1000);
-  if (secs < 10)  return 'Just now';
-  if (secs < 60)  return `${secs}s ago`;
+  if (secs < 10)   return 'Just now';
+  if (secs < 60)   return `${secs}s ago`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
   return `${Math.floor(secs / 3600)}h ago`;
 }
