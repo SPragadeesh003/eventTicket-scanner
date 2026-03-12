@@ -9,7 +9,10 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "$(PRODUCT_NAME) needs access to your Camera to scan ticket QR codes."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -19,7 +22,11 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.pragadeesh.ticketscanner",
+      "permissions": [
+        "android.permission.CAMERA"
+      ]
     },
     "web": {
       "output": "static",
@@ -27,6 +34,13 @@
     },
     "plugins": [
       "expo-router",
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "$(PRODUCT_NAME) needs access to your Camera to scan ticket QR codes.",
+          "enableCodeScanner": true
+        }
+      ],
       [
         "expo-splash-screen",
         {
@@ -38,11 +52,28 @@
             "backgroundColor": "#000000"
           }
         }
+      ],
+      "@lovesworking/watermelondb-expo-plugin-sdk-52-plus",
+      "./plugin/withNearbyPermissions.js",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 24,
+            "targetSdkVersion": 33
+          }
+        }
       ]
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "fbe3620a-aad0-4367-8d50-1cff42af529e"
+      }
     }
   }
 }

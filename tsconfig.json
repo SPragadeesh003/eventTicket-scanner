@@ -1,6 +1,10 @@
 {
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
+    "jsx": "react",
+    "emitDecoratorMetadata": false,
+    "experimentalDecorators": true,
+    "strictPropertyInitialization": false,
     "strict": true,
     "paths": {
       "@/*": [
@@ -12,6 +16,8 @@
     "**/*.ts",
     "**/*.tsx",
     ".expo/types/**/*.ts",
-    "expo-env.d.ts"
+    "expo-env.d.ts",
+    "seed/qrCode.js",
+    "seed/seed.js"
   ]
 }

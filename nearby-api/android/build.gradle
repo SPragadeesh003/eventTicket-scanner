@@ -1,0 +1,29 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+
+android {
+    compileSdkVersion 34
+    defaultConfig {
+        minSdkVersion 24
+        targetSdkVersion 34
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    // React Native
+    implementation 'com.facebook.react:react-native:+'
+
+    // Google Nearby Connections
+    implementation 'com.google.android.gms:play-services-nearby:19.1.0'
+}
