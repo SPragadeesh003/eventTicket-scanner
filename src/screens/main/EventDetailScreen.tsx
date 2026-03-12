@@ -24,6 +24,7 @@ import {
 } from '@/src/services/TicketSync';
 import {
   startNearbyService,
+  stopListening,
   getConnectedDevices,
   type NearbyCallbacks,
 } from '@/src/services/NearbyConnectionServices';
@@ -154,6 +155,7 @@ export default function EventDetailScreen() {
     return () => {
       mountedRef.current = false;
       unsubNet();
+      stopListening();
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [eventId]);

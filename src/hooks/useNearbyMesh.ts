@@ -70,7 +70,13 @@ export function useNearbyMesh() {
   useEffect(() => {
     if (!NearbyEmitter) return;
 
-    const onPeerConnected = NearbyEmitter.addListener(NEARBY_EVENTS.CONNECTED, (device: NearbyDevice) => {
+    const onPeerConnected = NearbyEmitter.addListener(NEARBY_EVENTS.CONNECTED, async (device: NearbyDevice) => {
+      const deviceId = await getDeviceId();
+      const suffix = deviceId.slice(-4).toUpperCase();
+      
+      // Filter out any device that has our same ID suffix (likely us)
+      if (device.deviceName.endsWith(suffix)) return;
+
       setPeers((prev) => {
         if (prev.find(p => p.endpointId === device.endpointId)) return prev;
         return [...prev, device];

@@ -16,10 +16,17 @@ import { supabase } from '@/src/lib/supabase';
 import { database } from '@/src/db/database';
 import { getDeviceId } from '@/src/utils/DeviceID';
 import { formatLastSync, syncEventTickets } from '@/src/services/TicketSync';
-import { useNearbyMesh } from '@/src/hooks/useNearbyMesh';
+import {
+  startNearbyService,
+  stopListening,
+  getConnectedDevices,
+  getDiscoveredDevices,
+  connectToDevice,
+  type NearbyCallbacks,
+} from '@/src/services/NearbyConnectionServices';
+import type { NearbyDevice } from '@/src/native/NearbyConnections';
 import type { Ticket, ScanLog, SyncedEvent } from '@/src/db/models';
 import { styles } from '@/src/styles/main/SyncStatusScreenStyles';
-import { nearbyStop } from '@/src/native/NearbyConnections';
 
 // ─── Types ────────────────────────────────────────────────────
 interface LocalStats {
@@ -95,7 +102,11 @@ export default function SyncStatusScreen() {
   const [phase, setPhase] = useState<SyncPhase>('idle');
   const [syncPct, setSyncPct] = useState(0);
   const [deviceId, setDeviceId] = useState('');
-  const { startMesh, peers, isMeshActive } = useNearbyMesh();
+  
+  // Mesh state
+  const [peers, setPeers] = useState<NearbyDevice[]>([]);
+  const [foundDevices, setFoundDevices] = useState<NearbyDevice[]>([]);
+  const [isMeshActive, setIsMeshActive] = useState(false);
 
   const mountedRef = useRef(false);
   const progressAnim = useRef(new Animated.Value(0)).current;
@@ -132,13 +143,34 @@ export default function SyncStatusScreen() {
     }
   }, [eventId]);
 
+  const refreshNearby = useCallback(async () => {
+    const connected = await getConnectedDevices();
+    const discovered = getDiscoveredDevices();
+    if (mountedRef.current) {
+      setPeers(connected);
+      setFoundDevices(discovered);
+    }
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
     getDeviceId().then(setDeviceId);
     loadStats();
 
-    // Start mesh (using gate 1 as default for now, or could be dynamic)
-    startMesh(1);
+    // ── Mesh Listeners ──────────────────────────────────────
+    const callbacks: NearbyCallbacks = {
+      onDeviceConnected:    () => { refreshNearby(); setIsMeshActive(true); },
+      onDeviceDisconnected: () => { refreshNearby(); },
+      onDeviceFound:        () => { refreshNearby(); },
+    };
+
+    // Start mesh (will initialize advertising/discovery globally)
+    startNearbyService(callbacks).then(() => {
+      if (mountedRef.current) {
+        setIsMeshActive(true);
+        refreshNearby();
+      }
+    });
 
     const unsubNet = NetInfo.addEventListener(state => {
       if (mountedRef.current) setIsOnline(!!state.isConnected);
@@ -147,7 +179,7 @@ export default function SyncStatusScreen() {
     return () => {
       mountedRef.current = false;
       unsubNet();
-      // nearbyStop(); // ✨ REMOVED: Keep mesh active in background for persistence
+      stopListening();
     };
   }, []);
 
@@ -210,6 +242,16 @@ export default function SyncStatusScreen() {
     outputRange: ['0%', '100%'],
   });
 
+  // ── Manual Connect ────────────────────────────────────────
+  const handleManualConnect = async (device: NearbyDevice) => {
+    const ok = await connectToDevice(device.endpointId, device.deviceName);
+    if (!ok) {
+      Alert.alert('Connection Error', `Failed to initiate connection to ${device.deviceName}`);
+    } else {
+      console.log('Manual connection initiated for', device.deviceName);
+    }
+  };
+
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor="#141414" />
@@ -266,6 +308,30 @@ export default function SyncStatusScreen() {
                 <View style={styles.checkCircle}>
                   <View style={styles.checkMark} />
                 </View>
+              </View>
+            ))}
+          </>
+        )}
+
+        {/* ── Found (Discovered) devices list ────────────────── */}
+        {foundDevices.length > 0 && (
+          <>
+            <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Nearby Devices Found</Text>
+            {foundDevices.map(device => (
+              <View key={device.endpointId} style={styles.dataRow}>
+                <View style={styles.dataIconWrap}>
+                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#888' }} />
+                </View>
+                <View style={styles.dataText}>
+                  <Text style={styles.dataTitle}>{device.deviceName}</Text>
+                  <Text style={styles.dataSub}>Visible but not linked</Text>
+                </View>
+                <TouchableOpacity 
+                   style={styles.meshActionBtn} 
+                   onPress={() => handleManualConnect(device)}
+                >
+                  <Text style={styles.meshActionText}>Connect</Text>
+                </TouchableOpacity>
               </View>
             ))}
           </>

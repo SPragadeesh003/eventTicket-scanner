@@ -15,7 +15,7 @@ import { getDeviceId } from '@/src/utils/DeviceID';
 import { validateTicket, type ScanResult } from '@/src/services/ScanService';
 import {
   startNearbyService,
-  stopNearbyService,
+  stopListening,
   broadcastScan,
   getConnectedDevices,
   type NearbyCallbacks,
@@ -123,7 +123,7 @@ export default function ScannerScreen() {
       startNearbyService(callbacks).then(() => setMeshStarted(true));
     });
 
-    return () => { stopNearbyService(); };
+    return () => { stopListening(); };
   }, []);
 
   // ── Camera permission request ─────────────────────────────

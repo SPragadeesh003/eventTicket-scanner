@@ -31,45 +31,52 @@ import com.google.android.gms.nearby.connection.PayloadTransferUpdate;
 import com.google.android.gms.nearby.connection.Strategy;
 
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.HashSet;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
 
-    private static final String TAG          = "NearbyConnections";
-    private static final String SERVICE_ID   = "com.pragadeesh.ticketscanner";
-    private static final Strategy STRATEGY   = Strategy.P2P_CLUSTER;
+    private static final String TAG        = "NearbyConnections";
+    private static final String SERVICE_ID = "com.pragadeesh.ticketscanner";
+    private static final Strategy STRATEGY = Strategy.P2P_CLUSTER;
 
     private final ReactApplicationContext reactContext;
     private ConnectionsClient connectionsClient;
-    private String localDeviceName; // ✨ Kept from previous optimization
-    private boolean isModuleDestroyed = false;  // ✨ NEW - prevent operations after destroy
+    private String localDeviceName;
+    private volatile boolean isModuleDestroyed = false;
 
-    // ── Track active connections ──────────────────────────────
+    // ── Active connection tracking ────────────────────────────────────────────
+    // endpointId → deviceName (only entries that are fully CONNECTED)
     private final Map<String, String> connectedEndpoints = new ConcurrentHashMap<>();
-    private final Object connectionLock = new Object();
-    private final Set<String> connectingEndpoints = new HashSet<>();
 
-    // ── Reliability Managers ──────────────────────────────────
-    private PermissionsManager permissionsManager;
+    // FIX #1: Persistent name cache so reconnection knows device names
+    // even after connectedEndpoints.remove() is called on disconnect
+    private final Map<String, String> endpointNameCache = new ConcurrentHashMap<>();
+
+    // FIX #2: Name resolved during onConnectionInitiated (before result arrives)
+    private final Map<String, String> pendingConnectionNames = new ConcurrentHashMap<>();
+
+    // FIX #3: ConcurrentHashMap.newKeySet() — fully thread-safe, no synchronized blocks needed
+    private final Set<String> connectingEndpoints = ConcurrentHashMap.newKeySet();
+
+    // ── Reliability managers ──────────────────────────────────────────────────
+    private PermissionsManager      permissionsManager;
     private ConnectionTimeoutManager timeoutManager;
-    private ReconnectionManager reconnectionManager;
-    private HeartbeatManager heartbeatManager;
-    private boolean managersInitialized = false;
+    private ReconnectionManager     reconnectionManager;
+    private HeartbeatManager        heartbeatManager;
+    private volatile boolean        managersInitialized = false;
 
-    // ── Events emitted to JS ──────────────────────────────────
-    private static final String EVENT_CONNECTED      = "NearbyConnected";
-    private static final String EVENT_DISCONNECTED   = "NearbyDisconnected";
-    private static final String EVENT_PAYLOAD        = "NearbyPayloadReceived";
-    private static final String EVENT_STATUS         = "NearbyStatusChanged";
-    private static final String EVENT_RECONNECT      = "NearbyReconnecting";
-    private static final String EVENT_PERMISSION     = "NearbyPermissionError";
-    private static final String EVENT_DEBUG          = "NearbyDebug";
+    // ── JS event names ────────────────────────────────────────────────────────
+    private static final String EVENT_CONNECTED    = "NearbyConnected";
+    private static final String EVENT_DISCONNECTED = "NearbyDisconnected";
+    private static final String EVENT_PAYLOAD      = "NearbyPayloadReceived";
+    private static final String EVENT_STATUS       = "NearbyStatusChanged";
+    private static final String EVENT_RECONNECT    = "NearbyReconnecting";
+    private static final String EVENT_PERMISSION   = "NearbyPermissionError";
+    private static final String EVENT_DEBUG        = "NearbyDebug";
+    private static final String EVENT_DEVICE_FOUND = "NearbyDeviceFound";
 
     public NearbyConnectionsModule(ReactApplicationContext context) {
         super(context);
@@ -83,58 +90,61 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         return "NearbyModule";
     }
 
-    /**
-     * Initialize all reliability managers (lazy initialization)
-     */
+    // ─────────────────────────────────────────────────────────────────────────
+    //  MANAGER INITIALIZATION
+    // ─────────────────────────────────────────────────────────────────────────
     private synchronized void ensureManagersInitialized() {
-        if (managersInitialized || isModuleDestroyed) {
-            return;
-        }
+        if (managersInitialized || isModuleDestroyed) return;
 
         Log.d(TAG, "🔧 Initializing managers...");
 
-        this.permissionsManager = new PermissionsManager();
-        this.timeoutManager = new ConnectionTimeoutManager();
-        this.heartbeatManager = new HeartbeatManager(reactContext, new HeartbeatManager.HeartbeatListener() {
-            @Override
-            public void onHeartbeatTimeout(String endpointId) {
+        permissionsManager = new PermissionsManager();
+        timeoutManager     = new ConnectionTimeoutManager();
+
+        // FIX #4: Pass connectedEndpoints so HeartbeatManager skips dead peers
+        heartbeatManager = new HeartbeatManager(
+            reactContext,
+            connectedEndpoints,
+            endpointId -> {
                 if (!isModuleDestroyed) {
-                    Log.w(TAG, "❌ Heartbeat timeout detected for: " + endpointId);
+                    Log.w(TAG, "❌ Heartbeat timeout: " + endpointId);
                     handleHeartbeatTimeout(endpointId);
                 }
             }
-        });
-        this.reconnectionManager = new ReconnectionManager(reactContext, new ReconnectionManager.ReconnectionListener() {
-            @Override
-            public void onReconnectScheduled(String endpointId, int attempt) {
-                if (!isModuleDestroyed) {
-                    Log.d(TAG, "⚡ Reconnect scheduled for: " + endpointId + " (attempt " + attempt + ")");
-                    emitReconnecting(endpointId, attempt);
-                }
-            }
+        );
 
-            @Override
-            public void onReconnectAttempt(String endpointId, int attempt) {
-                if (!isModuleDestroyed) {
-                    Log.d(TAG, "🔄 Attempting reconnection to: " + endpointId);
-                    attemptReconnection(endpointId);
+        reconnectionManager = new ReconnectionManager(
+            reactContext,
+            new ReconnectionManager.ReconnectionListener() {
+                @Override
+                public void onReconnectScheduled(String endpointId, int attempt) {
+                    if (!isModuleDestroyed) emitReconnecting(endpointId, attempt);
                 }
-            }
 
-            @Override
-            public void onReconnectFailed(String endpointId) {
-                if (!isModuleDestroyed) {
-                    Log.e(TAG, "❌ All reconnection attempts failed for: " + endpointId);
-                    emitStatus("reconnect_failed_" + endpointId);
+                @Override
+                public void onReconnectAttempt(String endpointId, int attempt) {
+                    if (!isModuleDestroyed) attemptReconnection(endpointId);
+                }
+
+                @Override
+                public void onReconnectFailed(String endpointId) {
+                    if (!isModuleDestroyed) {
+                        Log.e(TAG, "❌ All reconnection attempts failed: " + endpointId);
+                        // Clean up name cache for permanently lost peer
+                        endpointNameCache.remove(endpointId);
+                        emitStatus("reconnect_failed_" + endpointId);
+                    }
                 }
             }
-        });
+        );
 
         managersInitialized = true;
         Log.d(TAG, "✅ All managers initialized");
     }
 
-    // ── Permissions ──────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  PERMISSIONS
+    // ─────────────────────────────────────────────────────────────────────────
     @ReactMethod
     public void checkPermissions(Promise promise) {
         ensureManagersInitialized();
@@ -151,38 +161,39 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
                 promise.resolve(true);
                 return;
             }
-
             ensureManagersInitialized();
             List<String> missing = permissionsManager.getMissingPermissions(reactContext);
             if (missing.isEmpty()) {
                 promise.resolve(true);
                 return;
             }
-
             if (getCurrentActivity() == null) {
                 promise.reject("NO_ACTIVITY", "Cannot request permissions without an activity");
                 return;
             }
-
-            String[] permissions = missing.toArray(new String[0]);
-            getCurrentActivity().requestPermissions(permissions, 1234);
+            getCurrentActivity().requestPermissions(missing.toArray(new String[0]), 1234);
             promise.resolve(true);
         } catch (Exception e) {
             promise.reject("PERMISSION_REQUEST_ERROR", e.getMessage());
         }
     }
 
-    // ── Start advertising + discovering ───────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  START / STOP
+    // ─────────────────────────────────────────────────────────────────────────
     @ReactMethod
     public void start(String deviceName, Promise promise) {
         try {
-            Log.d(TAG, "🟢 Nearby service init as: " + deviceName);
+            Log.d(TAG, "🟢 Nearby init as: " + deviceName);
             ensureManagersInitialized();
+
             if (!permissionsManager.hasAllNearbyPermissions(reactContext)) {
-                emitPermissionError(permissionsManager.getMissingPermissions(reactContext).toString());
-                promise.reject("PERMISSION_DENIED", "Missing Nearby permissions");
+                List<String> missing = permissionsManager.getMissingPermissions(reactContext);
+                emitPermissionError(missing.toString());
+                promise.reject("PERMISSION_DENIED", "Missing Nearby permissions: " + missing);
                 return;
             }
+
             connectionsClient = Nearby.getConnectionsClient(reactContext);
             heartbeatManager.startHeartbeat();
             promise.resolve(true);
@@ -196,10 +207,10 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         try {
             this.localDeviceName = deviceName;
             if (isModuleDestroyed || connectionsClient == null) {
-                promise.reject("ERROR", "Service not initialized");
+                promise.reject("ERROR", "Service not initialized — call start() first");
                 return;
             }
-            startAdvertising(deviceName);
+            startAdvertisingInternal(deviceName);
             promise.resolve(true);
         } catch (Exception e) {
             promise.reject("ERROR", e.getMessage());
@@ -210,22 +221,21 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
     public void startDiscovery(Promise promise) {
         try {
             if (isModuleDestroyed || connectionsClient == null) {
-                promise.reject("ERROR", "Service not initialized");
+                promise.reject("ERROR", "Service not initialized — call start() first");
                 return;
             }
-            startDiscovery();
+            startDiscoveryInternal();
             promise.resolve(true);
         } catch (Exception e) {
             promise.reject("ERROR", e.getMessage());
         }
     }
 
-    // ── Stop all connections ──────────────────────────────────
     @ReactMethod
     public void stop(Promise promise) {
         try {
             if (isModuleDestroyed) {
-                Log.w(TAG, "⚠️  Module already destroyed, skipping stop");
+                Log.w(TAG, "⚠️ Module already destroyed");
                 if (promise != null) promise.resolve(true);
                 return;
             }
@@ -233,90 +243,347 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             Log.d(TAG, "🔴 Stopping Nearby service...");
 
             if (connectionsClient != null) {
-                // Stop discovery and advertising
-                try {
-                    connectionsClient.stopAdvertising();
-                    Log.d(TAG, "✅ Advertising stopped");
-                } catch (Exception e) {
-                    Log.w(TAG, "⚠️  stopAdvertising error: " + e.getMessage());
+                try { connectionsClient.stopAdvertising(); }
+                catch (Exception e) { Log.w(TAG, "stopAdvertising: " + e.getMessage()); }
+
+                try { connectionsClient.stopDiscovery(); }
+                catch (Exception e) { Log.w(TAG, "stopDiscovery: " + e.getMessage()); }
+
+                for (String endpointId : connectedEndpoints.keySet()) {
+                    try { disconnectFromEndpoint(endpointId); }
+                    catch (Exception e) { Log.w(TAG, "disconnect " + endpointId + ": " + e.getMessage()); }
                 }
 
-                try {
-                    connectionsClient.stopDiscovery();
-                    Log.d(TAG, "✅ Discovery stopped");
-                } catch (Exception e) {
-                    Log.w(TAG, "⚠️  stopDiscovery error: " + e.getMessage());
-                }
-
-                // Disconnect all endpoints
-                Set<String> endpointsCopy = new HashSet<>(connectedEndpoints.keySet());
-                for (String endpointId : endpointsCopy) {
-                    try {
-                        disconnectFromEndpoint(endpointId);
-                    } catch (Exception e) {
-                        Log.w(TAG, "⚠️  Error disconnecting " + endpointId + ": " + e.getMessage());
-                    }
-                }
-
-                try {
-                    connectionsClient.stopAllEndpoints();
-                } catch (Exception e) {
-                    Log.w(TAG, "⚠️  stopAllEndpoints error: " + e.getMessage());
-                }
+                try { connectionsClient.stopAllEndpoints(); }
+                catch (Exception e) { Log.w(TAG, "stopAllEndpoints: " + e.getMessage()); }
             }
 
-            // Shutdown managers ONLY if initialized
             if (managersInitialized) {
-                Log.d(TAG, "🔧 Shutting down managers...");
-                try { heartbeatManager.shutdown(); } catch (Exception e) { Log.w(TAG, "⚠️  heartbeat shutdown: " + e.getMessage()); }
-                try { timeoutManager.shutdown(); } catch (Exception e) { Log.w(TAG, "⚠️  timeout shutdown: " + e.getMessage()); }
-                try { reconnectionManager.shutdown(); } catch (Exception e) { Log.w(TAG, "⚠️  reconnection shutdown: " + e.getMessage()); }
+                try { heartbeatManager.shutdown(); }    catch (Exception e) { Log.w(TAG, e.getMessage()); }
+                try { timeoutManager.shutdown(); }      catch (Exception e) { Log.w(TAG, e.getMessage()); }
+                try { reconnectionManager.shutdown(); } catch (Exception e) { Log.w(TAG, e.getMessage()); }
                 managersInitialized = false;
             }
 
             connectedEndpoints.clear();
-            synchronized (connectionLock) {
-                connectingEndpoints.clear();
-            }
+            connectingEndpoints.clear();
+            pendingConnectionNames.clear();
+            // Keep endpointNameCache — useful if service restarts and finds same peers
 
             emitStatus("stopped");
-            if (promise != null) {
-                promise.resolve(true);
-            }
+            if (promise != null) promise.resolve(true);
             Log.d(TAG, "✅ Nearby service stopped");
         } catch (Exception e) {
             Log.e(TAG, "❌ stop error: " + e.getMessage(), e);
-            if (promise != null) {
-                promise.reject("STOP_ERROR", e.getMessage());
-            }
+            if (promise != null) promise.reject("STOP_ERROR", e.getMessage());
         }
     }
 
-    // ── Broadcast payload to ALL connected peers ──────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ADVERTISING
+    // ─────────────────────────────────────────────────────────────────────────
+    private void startAdvertisingInternal(String deviceName) {
+        if (connectionsClient == null || isModuleDestroyed) return;
+
+        AdvertisingOptions options = new AdvertisingOptions.Builder()
+                .setStrategy(STRATEGY)
+                .build();
+
+        connectionsClient.startAdvertising(
+                deviceName, SERVICE_ID, connectionLifecycleCallback, options
+        ).addOnSuccessListener(unused -> {
+            if (!isModuleDestroyed) {
+                Log.d(TAG, "✅ Advertising started");
+                emitDebug("Advertising started as: " + deviceName);
+            }
+        }).addOnFailureListener(e -> {
+            if (isModuleDestroyed) return;
+
+            if (e instanceof com.google.android.gms.common.api.ApiException) {
+                int code = ((com.google.android.gms.common.api.ApiException) e).getStatusCode();
+                if (code == ConnectionsStatusCodes.STATUS_ALREADY_ADVERTISING) {
+                    Log.d(TAG, "✅ Already advertising");
+                    return;
+                }
+            }
+
+            Log.e(TAG, "❌ Advertising failed: " + e.getMessage());
+            emitDebug("Advertising failed: " + e.getMessage() + ". Retrying in 2s...");
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                if (!isModuleDestroyed) startAdvertisingInternal(deviceName);
+            }, 2000);
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  DISCOVERY
+    // ─────────────────────────────────────────────────────────────────────────
+    private void startDiscoveryInternal() {
+        if (connectionsClient == null || isModuleDestroyed) return;
+
+        DiscoveryOptions options = new DiscoveryOptions.Builder()
+                .setStrategy(STRATEGY)
+                .build();
+
+        connectionsClient.startDiscovery(
+                SERVICE_ID, endpointDiscoveryCallback, options
+        ).addOnSuccessListener(unused -> {
+            if (!isModuleDestroyed) {
+                Log.d(TAG, "✅ Discovery started");
+                emitDebug("Discovery started. Scanning for nearby devices...");
+            }
+        }).addOnFailureListener(e -> {
+            if (isModuleDestroyed) return;
+
+            if (e instanceof com.google.android.gms.common.api.ApiException) {
+                int code = ((com.google.android.gms.common.api.ApiException) e).getStatusCode();
+                if (code == ConnectionsStatusCodes.STATUS_ALREADY_DISCOVERING) {
+                    Log.d(TAG, "✅ Already discovering");
+                    return;
+                }
+            }
+
+            Log.e(TAG, "❌ Discovery failed: " + e.getMessage());
+            emitDebug("Discovery failed: " + e.getMessage() + ". Retrying in 2s...");
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                if (!isModuleDestroyed) startDiscoveryInternal();
+            }, 2000);
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  CONNECTION LIFECYCLE
+    // ─────────────────────────────────────────────────────────────────────────
+    private final ConnectionLifecycleCallback connectionLifecycleCallback =
+            new ConnectionLifecycleCallback() {
+
+        @Override
+        public void onConnectionInitiated(@NonNull String endpointId,
+                                          @NonNull ConnectionInfo connectionInfo) {
+            if (isModuleDestroyed) return;
+
+            String remoteName = connectionInfo.getEndpointName();
+            Log.d(TAG, "🔗 Connection initiated: " + endpointId + " (" + remoteName + ")");
+
+            // FIX #2: Store name NOW — before result arrives — so we have it in onConnectionResult
+            pendingConnectionNames.put(endpointId, remoteName);
+            // Also update persistent cache
+            endpointNameCache.put(endpointId, remoteName);
+
+            try {
+                connectionsClient.acceptConnection(endpointId, payloadCallback);
+            } catch (Exception e) {
+                Log.e(TAG, "❌ acceptConnection error: " + e.getMessage());
+                timeoutManager.cancelTimeout(endpointId);
+                pendingConnectionNames.remove(endpointId);
+            }
+        }
+
+        @Override
+        public void onConnectionResult(@NonNull String endpointId,
+                                       @NonNull ConnectionResolution result) {
+            if (isModuleDestroyed) return;
+
+            connectingEndpoints.remove(endpointId); // FIX #3: no synchronized needed
+            timeoutManager.cancelTimeout(endpointId);
+
+            // FIX #2: Get name from pendingConnectionNames, fall back to cache
+            String deviceName = pendingConnectionNames.remove(endpointId);
+            if (deviceName == null) {
+                deviceName = endpointNameCache.getOrDefault(endpointId, endpointId);
+            }
+
+            if (result.getStatus().getStatusCode() == ConnectionsStatusCodes.STATUS_OK) {
+                connectedEndpoints.put(endpointId, deviceName);
+                heartbeatManager.startHeartbeatForEndpoint(endpointId);
+                reconnectionManager.clearAttempts(endpointId);
+
+                Log.d(TAG, "✅ Connected: " + deviceName + " (" + connectedEndpoints.size() + " total)");
+                emitDebug("Connected to: " + deviceName);
+                emitConnected(endpointId, deviceName);
+            } else {
+                int statusCode = result.getStatus().getStatusCode();
+                Log.e(TAG, "❌ Connection failed: " + deviceName + " code: " + statusCode);
+                emitDebug("Connection failed: " + deviceName + " (" + statusCode + ")");
+                scheduleReconnection(endpointId, deviceName);
+            }
+        }
+
+        @Override
+        public void onDisconnected(@NonNull String endpointId) {
+            if (isModuleDestroyed) return;
+
+            // FIX #1: name stays in endpointNameCache even after removal here
+            String deviceName = connectedEndpoints.remove(endpointId);
+            if (deviceName == null) deviceName = endpointNameCache.getOrDefault(endpointId, endpointId);
+
+            Log.d(TAG, "❌ Disconnected: " + deviceName);
+            heartbeatManager.stopHeartbeatForEndpoint(endpointId);
+            timeoutManager.cancelTimeout(endpointId);
+            connectingEndpoints.remove(endpointId); // FIX #3
+
+            emitDisconnected(endpointId, deviceName);
+            scheduleReconnection(endpointId, deviceName);
+        }
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ENDPOINT DISCOVERY CALLBACK
+    // ─────────────────────────────────────────────────────────────────────────
+    private final EndpointDiscoveryCallback endpointDiscoveryCallback =
+            new EndpointDiscoveryCallback() {
+
+        @Override
+        public void onEndpointFound(@NonNull String endpointId,
+                                    @NonNull DiscoveredEndpointInfo info) {
+            if (isModuleDestroyed) return;
+
+            String remoteName = info.getEndpointName();
+
+            // Self-filter
+            if (localDeviceName != null && localDeviceName.equals(remoteName)) {
+                Log.d(TAG, "📵 [Self-Filter] Ignoring self: " + remoteName);
+                return;
+            }
+
+            // Persist name immediately on discovery
+            endpointNameCache.put(endpointId, remoteName);
+
+            Log.d(TAG, "🔍 Endpoint found: " + remoteName + " (" + endpointId + ")");
+            emitDebug("Found device: " + remoteName);
+
+            // Emit to JS for UI device list
+            WritableMap found = Arguments.createMap();
+            found.putString("endpointId", endpointId);
+            found.putString("deviceName", remoteName);
+            emit(EVENT_DEVICE_FOUND, found);
+
+            // Skip if already connected (purge stale state first)
+            if (connectedEndpoints.containsKey(endpointId)) {
+                Log.w(TAG, "⚠️ Already connected to " + remoteName + ", purging stale state");
+                connectedEndpoints.remove(endpointId);
+                heartbeatManager.stopHeartbeatForEndpoint(endpointId);
+            }
+
+            // Skip if already connecting — FIX #3: no synchronized block needed
+            if (connectingEndpoints.contains(endpointId)) {
+                Log.w(TAG, "⚠️ Already connecting to: " + remoteName);
+                return;
+            }
+
+            // Tie-breaker: lexicographically greater name initiates connection
+            // Prevents both devices simultaneously calling requestConnection to each other
+            if (localDeviceName != null && localDeviceName.compareTo(remoteName) > 0) {
+                connectingEndpoints.add(endpointId);
+                Log.d(TAG, "⚖️ I am greater (" + localDeviceName + " > " + remoteName + "). Initiating.");
+                requestConnectionInternal(endpointId, remoteName);
+            } else {
+                Log.d(TAG, "⚖️ Waiting for " + remoteName + " to connect to me.");
+            }
+        }
+
+        @Override
+        public void onEndpointLost(@NonNull String endpointId) {
+            if (isModuleDestroyed) return;
+            String name = endpointNameCache.getOrDefault(endpointId, endpointId);
+            Log.d(TAG, "👋 Endpoint lost: " + name);
+            connectedEndpoints.remove(endpointId);
+            connectingEndpoints.remove(endpointId); // FIX #3
+        }
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  REQUEST CONNECTION (exposed to JS for manual connect)
+    // ─────────────────────────────────────────────────────────────────────────
+    @ReactMethod
+    public void requestConnection(String endpointId, String endpointName, Promise promise) {
+        if (isModuleDestroyed || connectionsClient == null) {
+            if (promise != null) promise.resolve(false);
+            return;
+        }
+        // Update name cache from JS call too
+        if (endpointName != null) endpointNameCache.put(endpointId, endpointName);
+        requestConnectionInternal(endpointId, endpointName != null ? endpointName : endpointId);
+        if (promise != null) promise.resolve(true);
+    }
+
+    private void requestConnectionInternal(String endpointId, String endpointName) {
+        if (connectionsClient == null || isModuleDestroyed) return;
+
+        String myName = localDeviceName != null ? localDeviceName : android.os.Build.MODEL;
+
+        try {
+            connectionsClient.requestConnection(myName, endpointId, connectionLifecycleCallback)
+                .addOnSuccessListener(unused -> {
+                    if (isModuleDestroyed) return;
+                    Log.d(TAG, "✅ Connection request sent to: " + endpointName);
+
+                    timeoutManager.startConnectionTimeout(endpointId, () -> {
+                        if (!isModuleDestroyed) {
+                            Log.w(TAG, "⏱️ Connection timeout: " + endpointId);
+                            connectingEndpoints.remove(endpointId);
+                            scheduleReconnection(endpointId, endpointName);
+                        }
+                    });
+                })
+                .addOnFailureListener(e -> {
+                    if (isModuleDestroyed) return;
+
+                    if (e instanceof com.google.android.gms.common.api.ApiException) {
+                        int code = ((com.google.android.gms.common.api.ApiException) e).getStatusCode();
+
+                        if (code == ConnectionsStatusCodes.STATUS_ALREADY_CONNECTED_TO_ENDPOINT) {
+                            Log.d(TAG, "♻️ Already connected to " + endpointName + " — purging stale state");
+                            connectionsClient.disconnectFromEndpoint(endpointId);
+                            connectedEndpoints.remove(endpointId);
+                        }
+
+                        if (code == ConnectionsStatusCodes.STATUS_ALREADY_ADVERTISING
+                                || code == ConnectionsStatusCodes.STATUS_ALREADY_DISCOVERING) {
+                            Log.d(TAG, "ℹ️ Status code " + code + " — non-fatal, skipping reconnect");
+                            connectingEndpoints.remove(endpointId);
+                            return;
+                        }
+                    }
+
+                    Log.w(TAG, "⚠️ requestConnection failed for " + endpointName + ": " + e.getMessage());
+                    connectingEndpoints.remove(endpointId);
+                    scheduleReconnection(endpointId, endpointName);
+                });
+        } catch (Exception e) {
+            Log.e(TAG, "❌ requestConnectionInternal exception: " + e.getMessage(), e);
+            connectingEndpoints.remove(endpointId);
+            scheduleReconnection(endpointId, endpointName);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  BROADCAST PAYLOAD
+    // ─────────────────────────────────────────────────────────────────────────
     @ReactMethod
     public void broadcastPayload(String jsonPayload, Promise promise) {
         if (isModuleDestroyed) {
             promise.reject("MODULE_DESTROYED", "Module has been destroyed");
             return;
         }
-
         if (connectionsClient == null || connectedEndpoints.isEmpty()) {
-            Log.w(TAG, "⚠️  No connected devices to broadcast to");
+            Log.w(TAG, "⚠️ No connected devices to broadcast to");
             promise.resolve(false);
             return;
         }
+
         try {
-            byte[] bytes   = jsonPayload.getBytes(StandardCharsets.UTF_8);
+            byte[]  bytes   = jsonPayload.getBytes(StandardCharsets.UTF_8);
             Payload payload = Payload.fromBytes(bytes);
 
             Log.d(TAG, "📤 Broadcasting to " + connectedEndpoints.size() + " devices");
 
-            for (String endpointId : connectedEndpoints.keySet()) {
+            for (Map.Entry<String, String> entry : connectedEndpoints.entrySet()) {
                 try {
-                    connectionsClient.sendPayload(endpointId, payload);
-                    Log.d(TAG, "   ✅ Sent to: " + endpointId);
+                    connectionsClient.sendPayload(entry.getKey(), payload);
+                    Log.d(TAG, "   ✅ Sent to: " + entry.getValue());
                 } catch (Exception e) {
-                    Log.w(TAG, "   ❌ Failed to send to " + endpointId + ": " + e.getMessage());
+                    Log.w(TAG, "   ❌ Failed to send to " + entry.getValue() + ": " + e.getMessage());
                 }
             }
             promise.resolve(true);
@@ -326,14 +593,15 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         }
     }
 
-    // ── Get connected device count ────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  GET CONNECTED DEVICES
+    // ─────────────────────────────────────────────────────────────────────────
     @ReactMethod
     public void getConnectedDevices(Promise promise) {
         if (isModuleDestroyed) {
             promise.resolve(Arguments.createArray());
             return;
         }
-
         com.facebook.react.bridge.WritableArray arr = Arguments.createArray();
         for (Map.Entry<String, String> entry : connectedEndpoints.entrySet()) {
             WritableMap device = Arguments.createMap();
@@ -344,297 +612,48 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         promise.resolve(arr);
     }
 
-    // ── Get Diagnostics ─────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  DIAGNOSTICS
+    // ─────────────────────────────────────────────────────────────────────────
     @ReactMethod
     public void getDiagnostics(Promise promise) {
         if (isModuleDestroyed) {
             promise.reject("MODULE_DESTROYED", "Module has been destroyed");
             return;
         }
-
         try {
             ensureManagersInitialized();
-
-            WritableMap diagnostics = Arguments.createMap();
-
-            diagnostics.putString("device_model", Build.MODEL);
-            diagnostics.putInt("android_version", Build.VERSION.SDK_INT);
-
-            diagnostics.putBoolean("bluetooth_scan", 
-                ContextCompat.checkSelfPermission(reactContext, 
-                    Manifest.permission.BLUETOOTH_SCAN) == android.content.pm.PackageManager.PERMISSION_GRANTED);
-            diagnostics.putBoolean("bluetooth_connect",
-                ContextCompat.checkSelfPermission(reactContext,
-                    Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED);
-            diagnostics.putBoolean("location",
-                ContextCompat.checkSelfPermission(reactContext,
-                    Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED);
-
-            diagnostics.putInt("connected_devices", connectedEndpoints.size());
-            diagnostics.putInt("connecting_devices", connectingEndpoints.size());
-            diagnostics.putString("service_id", SERVICE_ID);
-            diagnostics.putString("strategy", STRATEGY.toString());
-
-            Log.d(TAG, "📊 Diagnostics: " + diagnostics.toString());
-            promise.resolve(diagnostics);
+            WritableMap d = Arguments.createMap();
+            d.putString("device_model",    android.os.Build.MODEL);
+            d.putInt("android_version",    android.os.Build.VERSION.SDK_INT);
+            d.putString("local_name",      localDeviceName != null ? localDeviceName : "");
+            d.putInt("connected_devices",  connectedEndpoints.size());
+            d.putInt("connecting_devices", connectingEndpoints.size());
+            d.putInt("cached_names",       endpointNameCache.size());
+            d.putString("service_id",      SERVICE_ID);
+            d.putString("strategy",        STRATEGY.toString());
+            d.putBoolean("bt_scan",
+                ContextCompat.checkSelfPermission(reactContext, Manifest.permission.BLUETOOTH_SCAN)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED);
+            d.putBoolean("bt_advertise",
+                ContextCompat.checkSelfPermission(reactContext, Manifest.permission.BLUETOOTH_ADVERTISE)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED);
+            d.putBoolean("bt_connect",
+                ContextCompat.checkSelfPermission(reactContext, Manifest.permission.BLUETOOTH_CONNECT)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED);
+            d.putBoolean("location",
+                ContextCompat.checkSelfPermission(reactContext, Manifest.permission.ACCESS_FINE_LOCATION)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED);
+            Log.d(TAG, "📊 Diagnostics: " + d.toString());
+            promise.resolve(d);
         } catch (Exception e) {
             promise.reject("DIAGNOSTIC_ERROR", e.getMessage());
         }
     }
 
-    // ─────────────────────────────────────────────────────────
-    //  ADVERTISING
-    // ─────────────────────────────────────────────────────────
-    private void startAdvertising(String deviceName) {
-        if (connectionsClient == null || isModuleDestroyed) {
-            Log.e(TAG, "❌ Cannot advertise - connectionsClient null or module destroyed");
-            return;
-        }
-
-        AdvertisingOptions options = new AdvertisingOptions.Builder()
-                .setStrategy(STRATEGY)
-                .build();
-
-        connectionsClient.startAdvertising(
-                deviceName,
-                SERVICE_ID,
-                connectionLifecycleCallback,
-                options
-        ).addOnSuccessListener(unused -> {
-            if (!isModuleDestroyed) {
-                Log.d(TAG, "✅ Advertising started successfully");
-                emitDebug("Advertising started as: " + deviceName);
-            }
-        }).addOnFailureListener(e -> {
-            if (!isModuleDestroyed) {
-                Log.e(TAG, "❌ Advertising failed: " + e.getMessage());
-                emitDebug("Advertising failed: " + e.getMessage() + ". Retrying in 2s...");
-                // ✨ RETRY LOGIC
-                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                    if (!isModuleDestroyed) startAdvertising(deviceName);
-                }, 2000);
-            }
-        });
-    }
-
-    // ─────────────────────────────────────────────────────────
-    //  DISCOVERY
-    // ─────────────────────────────────────────────────────────
-    private void startDiscovery() {
-        if (connectionsClient == null || isModuleDestroyed) {
-            Log.e(TAG, "❌ Cannot discover - connectionsClient null or module destroyed");
-            return;
-        }
-
-        DiscoveryOptions options = new DiscoveryOptions.Builder()
-                .setStrategy(STRATEGY)
-                .build();
-
-        connectionsClient.startDiscovery(
-                SERVICE_ID,
-                endpointDiscoveryCallback,
-                options
-        ).addOnSuccessListener(unused -> {
-            if (!isModuleDestroyed) {
-                Log.d(TAG, "✅ Discovery started successfully");
-                emitDebug("Discovery started. Scanning for nearby devices...");
-            }
-        }).addOnFailureListener(e -> {
-            if (!isModuleDestroyed) {
-                Log.e(TAG, "❌ Discovery failed: " + e.getMessage());
-                emitDebug("Discovery failed: " + e.getMessage() + ". Retrying in 2s...");
-                // ✨ RETRY LOGIC
-                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                    if (!isModuleDestroyed) startDiscovery();
-                }, 2000);
-            }
-        });
-    }
-
-    // ─────────────────────────────────────────────────────────
-    //  CONNECTION LIFECYCLE WITH RELIABILITY
-    // ─────────────────────────────────────────────────────────
-    private final ConnectionLifecycleCallback connectionLifecycleCallback =
-            new ConnectionLifecycleCallback() {
-
-        @Override
-        public void onConnectionInitiated(@NonNull String endpointId,
-                                          @NonNull ConnectionInfo connectionInfo) {
-            if (isModuleDestroyed) return;
-
-            Log.d(TAG, "🔗 Connection initiated: " + endpointId
-                    + " (" + connectionInfo.getEndpointName() + ")");
-
-            // Start timeout moved to request phase for reliability, but we keep the acceptance logic here
-            try {
-                Log.d(TAG, "👍 Accepting connection from: " + endpointId);
-                connectionsClient.acceptConnection(endpointId, payloadCallback);
-            } catch (Exception e) {
-                Log.e(TAG, "❌ acceptConnection error: " + e.getMessage());
-                timeoutManager.cancelTimeout(endpointId);
-            }
-        }
-
-        @Override
-        public void onConnectionResult(@NonNull String endpointId,
-                                       @NonNull ConnectionResolution result) {
-            if (isModuleDestroyed) return;
-
-            synchronized (connectionLock) {
-                connectingEndpoints.remove(endpointId);
-            }
-
-            timeoutManager.cancelTimeout(endpointId);
-
-            if (result.getStatus().getStatusCode() == ConnectionsStatusCodes.STATUS_OK) {
-                String deviceName = result.getStatus().getStatusMessage() != null
-                        ? result.getStatus().getStatusMessage()
-                        : endpointId;
-
-                connectedEndpoints.put(endpointId, deviceName);
-                heartbeatManager.startHeartbeatForEndpoint(endpointId);
-                reconnectionManager.clearAttempts(endpointId);
-
-                Log.d(TAG, "✅ CONNECTION ESTABLISHED: " + endpointId);
-                emitDebug("Connected to: " + deviceName);
-                emitConnected(endpointId, deviceName);
-            } else {
-                Log.e(TAG, "❌ Connection failed: " + endpointId
-                        + " - " + result.getStatus().getStatusMessage());
-                emitDebug("Connection failed: " + result.getStatus().getStatusMessage());
-                scheduleReconnection(endpointId, 
-                    result.getStatus().getStatusMessage() != null 
-                        ? result.getStatus().getStatusMessage() 
-                        : "Unknown");
-            }
-        }
-
-        @Override
-        public void onDisconnected(@NonNull String endpointId) {
-            if (isModuleDestroyed) return;
-
-            String name = connectedEndpoints.remove(endpointId);
-            String deviceName = name != null ? name : endpointId;
-
-            Log.d(TAG, "❌ DISCONNECTED: " + endpointId);
-            emitDebug("Disconnected from: " + deviceName);
-
-            heartbeatManager.stopHeartbeatForEndpoint(endpointId);
-            timeoutManager.cancelTimeout(endpointId);
-            synchronized (connectionLock) {
-                connectingEndpoints.remove(endpointId);
-            }
-
-            emitDisconnected(endpointId, deviceName);
-            scheduleReconnection(endpointId, deviceName);
-        }
-    };
-
-    // ─────────────────────────────────────────────────────────
-    //  ENDPOINT DISCOVERY
-    // ─────────────────────────────────────────────────────────
-    private final EndpointDiscoveryCallback endpointDiscoveryCallback =
-            new EndpointDiscoveryCallback() {
-
-        @Override
-        public void onEndpointFound(@NonNull String endpointId,
-                                    @NonNull DiscoveredEndpointInfo info) {
-            if (isModuleDestroyed) return;
-
-            Log.d(TAG, "🔍 ENDPOINT DISCOVERED:");
-            Log.d(TAG, "   Endpoint ID: " + endpointId);
-            Log.d(TAG, "   Device Name: " + info.getEndpointName());
-            emitDebug("Found device: " + info.getEndpointName());
-
-            synchronized (connectionLock) {
-                if (connectingEndpoints.contains(endpointId) || connectedEndpoints.containsKey(endpointId)) {
-                    Log.w(TAG, "⚠️  Already connecting/connected to: " + endpointId);
-                    return;
-                }
-            }
-
-            String remoteEndpointName = info.getEndpointName();
-
-            // ✨ THE TIE-BREAKER: Prevent symmetric connection collisions
-            // Only initiate if our local name is lexicographically greater than the remote name.
-            if (localDeviceName != null && localDeviceName.compareTo(remoteEndpointName) > 0) {
-                synchronized (connectionLock) {
-                    connectingEndpoints.add(endpointId);
-                }
-                Log.d(TAG, "⚖️ [Tie-Breaker] I am greater (" + localDeviceName + " > " + remoteEndpointName + "). Initiating connection.");
-                requestConnection(endpointId, remoteEndpointName);
-            } else {
-                Log.d(TAG, "⚖️ [Tie-Breaker] They are greater or equal. Waiting for " + remoteEndpointName + " to connect to me.");
-                // We do nothing. Their requestConnection() will trigger our onConnectionInitiated().
-            }
-        }
-
-        @Override
-        public void onEndpointLost(@NonNull String endpointId) {
-            if (isModuleDestroyed) return;
-
-            Log.d(TAG, "👋 Endpoint lost: " + endpointId);
-            connectedEndpoints.remove(endpointId);
-            synchronized (connectionLock) {
-                connectingEndpoints.remove(endpointId);
-            }
-        }
-    };
-
-    // ─────────────────────────────────────────────────────────
-    //  REQUEST CONNECTION (✨ Kept reliability fixes)
-    // ─────────────────────────────────────────────────────────
-    private void requestConnection(String endpointId, String endpointName) {
-        if (connectionsClient == null || isModuleDestroyed) {
-            Log.e(TAG, "❌ Cannot request connection - connectionsClient null or module destroyed");
-            return;
-        }
-
-        try {
-            Log.d(TAG, "📞 Initiating connection request...");
-            connectionsClient.requestConnection(
-                    localDeviceName != null ? localDeviceName : Build.MODEL,
-                    endpointId,
-                    connectionLifecycleCallback
-            ).addOnSuccessListener(unused -> {
-                if (!isModuleDestroyed) {
-                    Log.d(TAG, "✅ Connection request sent to: " + endpointId);
-                    // ✨ Early timeout start
-                    timeoutManager.startConnectionTimeout(endpointId, () -> {
-                        if (!isModuleDestroyed) {
-                            Log.w(TAG, "⏱️  Connection timeout triggered for: " + endpointId);
-                            emitDebug("Connection timeout for: " + endpointId);
-                            synchronized (connectionLock) {
-                                connectingEndpoints.remove(endpointId);
-                            }
-                            scheduleReconnection(endpointId, endpointName);
-                        }
-                    });
-                }
-            }).addOnFailureListener(e -> {
-                if (!isModuleDestroyed) {
-                    Log.w(TAG, "⚠️  requestConnection failed for " + endpointId);
-                    Log.w(TAG, "   Error: " + e.getMessage());
-                    emitDebug("Connection request failed: " + e.getMessage());
-                    synchronized (connectionLock) {
-                        connectingEndpoints.remove(endpointId);
-                    }
-                    scheduleReconnection(endpointId, endpointName);
-                }
-            });
-        } catch (Exception e) {
-            Log.e(TAG, "❌ requestConnection exception: " + e.getMessage(), e);
-            emitDebug("Connection request exception: " + e.getMessage());
-            synchronized (connectionLock) {
-                connectingEndpoints.remove(endpointId);
-            }
-            scheduleReconnection(endpointId, endpointName);
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────
-    //  RECONNECTION & HEARTBEAT HANDLING
-    // ─────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  RECONNECTION & HEARTBEAT HELPERS
+    // ─────────────────────────────────────────────────────────────────────────
     private void scheduleReconnection(String endpointId, String endpointName) {
         if (!isModuleDestroyed && managersInitialized) {
             reconnectionManager.scheduleReconnect(endpointId, endpointName);
@@ -642,10 +661,10 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
     }
 
     private void attemptReconnection(String endpointId) {
-        if (!isModuleDestroyed) {
-            String endpointName = connectedEndpoints.getOrDefault(endpointId, endpointId);
-            requestConnection(endpointId, endpointName);
-        }
+        if (isModuleDestroyed) return;
+        // FIX #1: Use endpointNameCache — survives disconnection
+        String endpointName = endpointNameCache.getOrDefault(endpointId, endpointId);
+        requestConnectionInternal(endpointId, endpointName);
     }
 
     private void handleHeartbeatTimeout(String endpointId) {
@@ -653,48 +672,46 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             try {
                 connectionsClient.disconnectFromEndpoint(endpointId);
             } catch (Exception e) {
-                Log.e(TAG, "❌ Disconnect error: " + e.getMessage());
+                Log.e(TAG, "❌ Disconnect on heartbeat timeout error: " + e.getMessage());
             }
         }
     }
 
     private void disconnectFromEndpoint(String endpointId) {
-        if (!isModuleDestroyed) {
-            try {
-                if (managersInitialized) {
-                    heartbeatManager.stopHeartbeatForEndpoint(endpointId);
-                    timeoutManager.cancelTimeout(endpointId);
-                    reconnectionManager.clearAttempts(endpointId);
-                }
-
-                if (connectionsClient != null) {
-                    connectionsClient.disconnectFromEndpoint(endpointId);
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "❌ Error disconnecting from endpoint: " + e.getMessage());
+        if (isModuleDestroyed) return;
+        try {
+            if (managersInitialized) {
+                heartbeatManager.stopHeartbeatForEndpoint(endpointId);
+                timeoutManager.cancelTimeout(endpointId);
+                reconnectionManager.clearAttempts(endpointId);
             }
+            if (connectionsClient != null) {
+                connectionsClient.disconnectFromEndpoint(endpointId);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "❌ disconnectFromEndpoint error: " + e.getMessage());
         }
     }
 
-    // ─────────────────────────────────────────────────────────
-    //  PAYLOAD RECEIVED
-    // ─────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    //  PAYLOAD CALLBACK
+    // ─────────────────────────────────────────────────────────────────────────
     private final PayloadCallback payloadCallback = new PayloadCallback() {
 
         @Override
-        public void onPayloadReceived(@NonNull String endpointId,
-                                      @NonNull Payload payload) {
+        public void onPayloadReceived(@NonNull String endpointId, @NonNull Payload payload) {
             if (isModuleDestroyed) return;
 
             if (payload.getType() == Payload.Type.BYTES && payload.asBytes() != null) {
                 byte[] data = payload.asBytes();
 
+                // Heartbeat byte
                 if (data.length == 0 || (data.length == 1 && data[0] == 0x00)) {
                     heartbeatManager.recordHeartbeatReceived(endpointId);
-                    Log.d(TAG, "💓 Heartbeat received from: " + endpointId);
+                    Log.d(TAG, "💓 Heartbeat from: " + endpointNameCache.getOrDefault(endpointId, endpointId));
                 } else {
                     String json = new String(data, StandardCharsets.UTF_8);
-                    Log.d(TAG, "📨 Payload received from " + endpointId);
+                    Log.d(TAG, "📨 Payload from: " + endpointNameCache.getOrDefault(endpointId, endpointId));
                     emitPayload(endpointId, json);
                 }
             }
@@ -703,91 +720,83 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         @Override
         public void onPayloadTransferUpdate(@NonNull String endpointId,
                                             @NonNull PayloadTransferUpdate update) {
-            // No-op
+            // No-op for small byte payloads
         }
     };
 
-    // ─────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
     //  EMIT TO JS
-    // ─────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
     private void emitConnected(String endpointId, String deviceName) {
-        WritableMap map = Arguments.createMap();
-        map.putString("endpointId", endpointId);
-        map.putString("deviceName", deviceName);
-        emit(EVENT_CONNECTED, map);
+        WritableMap m = Arguments.createMap();
+        m.putString("endpointId", endpointId);
+        m.putString("deviceName", deviceName);
+        emit(EVENT_CONNECTED, m);
     }
 
     private void emitDisconnected(String endpointId, String deviceName) {
-        WritableMap map = Arguments.createMap();
-        map.putString("endpointId", endpointId);
-        map.putString("deviceName", deviceName);
-        emit(EVENT_DISCONNECTED, map);
+        WritableMap m = Arguments.createMap();
+        m.putString("endpointId", endpointId);
+        m.putString("deviceName", deviceName);
+        emit(EVENT_DISCONNECTED, m);
     }
 
     private void emitPayload(String endpointId, String json) {
-        WritableMap map = Arguments.createMap();
-        map.putString("endpointId", endpointId);
-        map.putString("payload", json);
-        emit(EVENT_PAYLOAD, map);
+        WritableMap m = Arguments.createMap();
+        m.putString("endpointId", endpointId);
+        m.putString("payload", json);
+        emit(EVENT_PAYLOAD, m);
     }
 
     private void emitReconnecting(String endpointId, int attempt) {
-        WritableMap map = Arguments.createMap();
-        map.putString("endpointId", endpointId);
-        map.putInt("attempt", attempt);
-        emit(EVENT_RECONNECT, map);
+        WritableMap m = Arguments.createMap();
+        m.putString("endpointId", endpointId);
+        m.putInt("attempt", attempt);
+        emit(EVENT_RECONNECT, m);
     }
 
-    private void emitPermissionError(String missingPermissions) {
-        WritableMap map = Arguments.createMap();
-        map.putString("missing", missingPermissions);
-        emit(EVENT_PERMISSION, map);
+    private void emitPermissionError(String missing) {
+        WritableMap m = Arguments.createMap();
+        m.putString("missing", missing);
+        emit(EVENT_PERMISSION, m);
     }
 
     private void emitStatus(String status) {
-        WritableMap map = Arguments.createMap();
-        map.putString("status", status);
-        emit(EVENT_STATUS, map);
+        WritableMap m = Arguments.createMap();
+        m.putString("status", status);
+        emit(EVENT_STATUS, m);
     }
 
     private void emitDebug(String message) {
-        WritableMap map = Arguments.createMap();
-        map.putString("message", message);
-        emit(EVENT_DEBUG, map);
+        WritableMap m = Arguments.createMap();
+        m.putString("message", message);
+        emit(EVENT_DEBUG, m);
     }
 
     private void emit(String event, WritableMap data) {
         if (isModuleDestroyed) return;
-
         try {
             reactContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
                 .emit(event, data);
         } catch (Exception e) {
-            Log.e(TAG, "❌ Failed to emit event " + event + ": " + e.getMessage());
+            Log.e(TAG, "❌ Failed to emit " + event + ": " + e.getMessage());
         }
     }
 
-    // Required for addListener/removeListeners (RN 0.65+)
+    // Required for RN 0.65+ event system
     @ReactMethod public void addListener(String eventName) {}
     @ReactMethod public void removeListeners(Integer count) {}
 
-    /**
-     * Clean up when module is destroyed
-     */
+    // ─────────────────────────────────────────────────────────────────────────
+    //  LIFECYCLE
+    // ─────────────────────────────────────────────────────────────────────────
     @Override
-    public void onCatalystInstanceDestroy() {
-        super.onCatalystInstanceDestroy();
-        Log.d(TAG, "🔴 Module destroy called");
-
-        isModuleDestroyed = true;  // ✨ Set flag FIRST
-
-        try {
-            stop(null);  // This will be safe now due to isModuleDestroyed flag
-        } catch (Exception e) {
-            Log.e(TAG, "❌ Error during cleanup: " + e.getMessage());
-        }
-
-        Log.d(TAG, "✅ Module destroyed completely");
+    public void invalidate() {
+        super.invalidate();
+        Log.d(TAG, "🔴 Module invalidate called");
+        isModuleDestroyed = true;
+        try { stop(null); } catch (Exception e) { Log.e(TAG, "❌ Error during invalidate: " + e.getMessage()); }
+        Log.d(TAG, "✅ Module destroyed");
     }
 }
