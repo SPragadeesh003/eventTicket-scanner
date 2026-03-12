@@ -32,6 +32,7 @@ import com.google.android.gms.nearby.connection.Strategy;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.HashSet;
