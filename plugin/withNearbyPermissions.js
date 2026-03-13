@@ -18,39 +18,23 @@ const fs   = require('fs');
 // Similarly CHANGE_WIFI_STATE and network state permissions are needed on all levels.
 //
 const NEARBY_PERMISSIONS = [
-  // ── Legacy Bluetooth — API <= 30 only ────────────────────────────────────
   { name: 'android.permission.BLUETOOTH',       maxSdkVersion: 30 },
   { name: 'android.permission.BLUETOOTH_ADMIN', maxSdkVersion: 30 },
 
-  // ── Legacy location — required for discovery on older API levels ──────────
   { name: 'android.permission.ACCESS_COARSE_LOCATION', maxSdkVersion: 28 },
   { name: 'android.permission.ACCESS_FINE_LOCATION',   minSdkVersion: 29, maxSdkVersion: 31 },
 
-  // ── Modern Bluetooth — API >= 31 ─────────────────────────────────────────
-  // neverForLocation: tells Android these are NOT used to infer location.
-  // Without this flag on API 31+, the device may block WiFi Direct operations.
   { name: 'android.permission.BLUETOOTH_SCAN',      minSdkVersion: 31, neverForLocation: true },
   { name: 'android.permission.BLUETOOTH_ADVERTISE', minSdkVersion: 31, neverForLocation: true },
   { name: 'android.permission.BLUETOOTH_CONNECT',   minSdkVersion: 31 },
+  { name: 'android.permission.ACCESS_WIFI_STATE'  },
+  { name: 'android.permission.CHANGE_WIFI_STATE',   neverForLocation: true },
 
-  // ── WiFi state — NO maxSdkVersion cap ────────────────────────────────────
-  // FIX: Previously these had maxSdkVersion:31 which caused error 8032 on
-  // Android 13/14 (API 32+). Nearby Connections needs these on ALL API levels.
-  { name: 'android.permission.ACCESS_WIFI_STATE'  },                          // ← no cap
-  { name: 'android.permission.CHANGE_WIFI_STATE',   neverForLocation: true }, // ← no cap
-
-  // ── Network state — needed for Nearby to detect transport availability ────
   { name: 'android.permission.ACCESS_NETWORK_STATE' },
   { name: 'android.permission.CHANGE_NETWORK_STATE' },
-
-  // ── NEARBY_WIFI_DEVICES — API >= 32 ──────────────────────────────────────
-  // Replaces ACCESS_FINE_LOCATION for WiFi Direct at API 32+.
-  // Without it, Nearby silently falls back to BLE-only (~10x slower, ~100m range limit).
-  // neverForLocation required or Android 13+ may deny WiFi Direct scan operations.
   { name: 'android.permission.NEARBY_WIFI_DEVICES', minSdkVersion: 32, neverForLocation: true },
 ];
 
-// ─── Step 1: Add permissions to AndroidManifest.xml ──────────────────────────
 function withNearbyPermissions(config) {
   return withAndroidManifest(config, (mod) => {
     const manifest = mod.modResults.manifest;
@@ -60,8 +44,6 @@ function withNearbyPermissions(config) {
     }
 
     for (const perm of NEARBY_PERMISSIONS) {
-      // Remove existing entry for this permission so we can re-add with correct attrs
-      // (handles the case where a previous build had the wrong maxSdkVersion)
       manifest['uses-permission'] = manifest['uses-permission'].filter(
         (p) => p.$?.['android:name'] !== perm.name
       );
@@ -85,7 +67,6 @@ function withNearbyPermissions(config) {
   });
 }
 
-// ─── Step 2: Add Nearby dependency to app/build.gradle ───────────────────────
 function withNearbyGradle(config) {
   return withAppBuildGradle(config, (mod) => {
     const gradle = mod.modResults.contents;
@@ -108,7 +89,6 @@ function withNearbyGradle(config) {
   });
 }
 
-// ─── Step 3: Copy Java files into the generated android project ───────────────
 function withNearbyJavaFiles(config) {
   return withDangerousMod(config, [
     'android',
@@ -156,7 +136,6 @@ function withNearbyJavaFiles(config) {
   ]);
 }
 
-// ─── Step 4: Register NearbyConnectionsPackage in MainApplication ─────────────
 function withNearbyMainApplication(config) {
   return withDangerousMod(config, [
     'android',
@@ -231,7 +210,6 @@ function withNearbyMainApplication(config) {
   ]);
 }
 
-// ─── Compose all steps ────────────────────────────────────────────────────────
 function withNearbyConnections(config) {
   config = withNearbyPermissions(config);
   config = withNearbyGradle(config);

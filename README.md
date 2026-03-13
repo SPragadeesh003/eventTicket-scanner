@@ -1,50 +1,51 @@
-# Welcome to your Expo app 👋
+# Ticket Scanner 👋
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+An offline-first, mesh-networking ticket scanning application built with Expo and React Native.
 
-## Get started
+## 🚀 Get Started
 
-1. Install dependencies
-
+1. **Install Dependencies**
    ```bash
-   npm install
+   yarn install
    ```
 
-2. Start the app
-
+2. **Prebuild Native Modules**
+   Since this project uses a custom local native module for Google Nearby Connections, you must prebuild the android/ios directories:
    ```bash
-   npx expo start
+   npx expo prebuild
    ```
 
-In the output, you'll find options to open the app in a
+3. **Run the App**
+   ```bash
+   yarn android
+   # or
+   yarn ios
+   ```
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+## 🏗️ Architecture & Approach
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+The application is designed for high-reliability scanning in environments with intermittent or zero internet connectivity (e.g., festivals, underground venues).
 
-## Get a fresh project
+### 1. Offline-First Data (WatermelonDB)
+We use **WatermelonDB** as the primary source of truth. Scans are committed locally in milliseconds, ensuring no "lag" at the gate even if the device is offline.
 
-When you're ready, run:
+### 2. Mesh Networking (Google Nearby Connections)
+A custom native module (`nearby-api`) facilitates peer-to-peer synchronization.
+- **P2P Sync**: Devices automatically discover and connect to each other.
+- **Mesh Protocol**: A proprietary acknowledgment-based protocol ensures that scan logs propagate across all devices in the cluster without a central server.
+- **Deduping**: Scans are SHA-hashed and verified against the local mesh state to prevent double-entry scanning across different devices.
 
-```bash
-npm run reset-project
-```
+### 3. Cloud Integration (Supabase)
+When internet is available, the primary device (or all devices) syncs the local WatermelonDB state with **Supabase**. This provides a global dashboard for event organizers while the ground operations remain autonomous.
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+### 4. Modular Implementation
+- `src/services/NearbyService`: Manages the lifecycle of P2P advertising, discovery, and connection health.
+- `src/services/MeshProtocols`: Handles the logic for sending, receiving, and acknowledging scan packets over the mesh.
+- `src/db`: Defines the schema and models for persistence.
 
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## 🛠️ Tech Stack
+- **Framework**: Expo (SDK 54)
+- **Database**: WatermelonDB (Local) + Supabase (Remote)
+- **State**: Zustand
+- **Networking**: Google Nearby Connections
+- **Styling**: Vanilla StyleSheet with central `COLORS` constants.

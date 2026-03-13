@@ -66,8 +66,7 @@
         "expo-build-properties",
         {
           "android": {
-            "minSdkVersion": 24,
-            "targetSdkVersion": 33
+            "minSdkVersion": 24
           }
         }
       ]
