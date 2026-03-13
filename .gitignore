@@ -42,3 +42,6 @@ app-example
 # generated native folders
 /ios
 /android
+
+# seed data and scripts
+/seed
