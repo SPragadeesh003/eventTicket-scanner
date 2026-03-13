@@ -1,51 +1,92 @@
 # Ticket Scanner 👋
 
-An offline-first, mesh-networking ticket scanning application built with Expo and React Native.
+An offline-first, mesh-networking ticket scanning application built with Expo and React Native. This app is designed for high-performance scanning in environments with unreliable or zero internet connectivity.
 
-## 🚀 Get Started
+## ✨ Key Features
 
+- **Offline-First Scanning**: Instant validation using a local WatermelonDB database.
+- **P2P Mesh Synchronization**: Automatic peer-to-peer data sync using Google Nearby Connections. No server required for ground operations.
+- **Conflict Resolution**: SHA-hashed scan logs with acknowledgment-based delivery to ensure data integrity across the mesh.
+- **Hybrid Cloud Sync**: Background synchronization with Supabase when internet connectivity is detected.
+- **Event Management**: View current and past events with real-time local statistics.
+- **Smart Search**: Rapidly find tickets by name or ID with an alphabet sidebar for large lists.
+- **Security**: Device-locked scanning and gate-specific logging.
+
+## 🏗️ Architecture & Approach
+
+### 1. Data Layer (WatermelonDB)
+We use **WatermelonDB** as the primary source of truth for the UI. It provides high-performance reactive updates and handles large datasets (thousands of tickets) with ease on mobile devices.
+
+### 2. Networking Layer (Google Nearby Connections)
+A custom native module (`nearby-api`) facilitates peer-to-peer communication.
+- **Advertising/Discovery**: Devices automatically find peers with the same service ID.
+- **Mesh Protocol**: A proprietary protocol handles handshakes, heartbeats, and reliable message delivery (ACKs).
+- **Outbox Pattern**: Failed messages are queued in a local outbox and retried with exponential backoff and jitter to prevent collisions.
+
+### 3. Backend (Supabase)
+Supabase acts as the central coordinator for event data and long-term storage of scan logs, providing a global dashboard for event organizers.
+
+## 📂 Project Structure
+
+```text
+├── app/                  # Expo Router directory (file-based routing)
+├── assets/               # Static assets (images, fonts)
+├── constants/            # App-wide constants (colors, routes, config)
+├── nearby-api/           # Custom Native Android Module for Nearby Connections
+├── src/
+│   ├── components/       # Reusable UI components
+│   ├── db/               # WatermelonDB schema, models, and database config
+│   ├── hooks/            # Custom React hooks (Nearby logic, auth)
+│   ├── lib/              # Third-party initializations (Supabase)
+│   ├── screens/          # Main application screens (Home, Scanner, Profile)
+│   ├── services/         # Core business logic
+│   │   ├── MeshProtocols/# P2P Messaging logic (Sender, Handlers, State)
+│   │   ├── NearbyService/# Discovery & Connection lifecycle
+│   │   └── ProfileService/# User & Device persistence
+│   ├── styles/           # Screen-specific and global styles
+│   ├── types/            # TypeScript interfaces and definitions
+│   └── utils/            # Helper functions (Date, DeviceID, Ticket)
+├── plugin/               # Expo Config Plugins (for native permissions/gradle)
+└── README.md
+```
+
+## 🛠️ Tech Stack
+
+- **Frontend**: Expo (SDK 54), React Native
+- **Database**: WatermelonDB (Offline), Supabase (Cloud)
+- **Networking**: Google Nearby Connections (P2P)
+- **State Management**: Zustand
+- **Icons**: Ionicons (@expo/vector-icons)
+
+## 🚀 Getting Started
+
+### Prerequisites
+- Node.js & Yarn
+- Android Studio (for Android builds)
+- Expo EAS CLI (`npm install -g eas-cli`)
+
+### Setup
 1. **Install Dependencies**
    ```bash
    yarn install
    ```
-
-2. **Prebuild Native Modules**
-   Since this project uses a custom local native module for Google Nearby Connections, you must prebuild the android/ios directories:
+2. **Environment Variables**
+   Create a `.env` file in the root with:
+   ```env
+   EXPO_PUBLIC_SUPABASE_URL=your_supabase_url
+   EXPO_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+   ```
+3. **Prebuild Native Modules**
    ```bash
    npx expo prebuild
    ```
-
-3. **Run the App**
+4. **Run the App**
    ```bash
    yarn android
-   # or
-   yarn ios
    ```
 
-## 🏗️ Architecture & Approach
+## 📝 Developer Notes
 
-The application is designed for high-reliability scanning in environments with intermittent or zero internet connectivity (e.g., festivals, underground venues).
-
-### 1. Offline-First Data (WatermelonDB)
-We use **WatermelonDB** as the primary source of truth. Scans are committed locally in milliseconds, ensuring no "lag" at the gate even if the device is offline.
-
-### 2. Mesh Networking (Google Nearby Connections)
-A custom native module (`nearby-api`) facilitates peer-to-peer synchronization.
-- **P2P Sync**: Devices automatically discover and connect to each other.
-- **Mesh Protocol**: A proprietary acknowledgment-based protocol ensures that scan logs propagate across all devices in the cluster without a central server.
-- **Deduping**: Scans are SHA-hashed and verified against the local mesh state to prevent double-entry scanning across different devices.
-
-### 3. Cloud Integration (Supabase)
-When internet is available, the primary device (or all devices) syncs the local WatermelonDB state with **Supabase**. This provides a global dashboard for event organizers while the ground operations remain autonomous.
-
-### 4. Modular Implementation
-- `src/services/NearbyService`: Manages the lifecycle of P2P advertising, discovery, and connection health.
-- `src/services/MeshProtocols`: Handles the logic for sending, receiving, and acknowledging scan packets over the mesh.
-- `src/db`: Defines the schema and models for persistence.
-
-## 🛠️ Tech Stack
-- **Framework**: Expo (SDK 54)
-- **Database**: WatermelonDB (Local) + Supabase (Remote)
-- **State**: Zustand
-- **Networking**: Google Nearby Connections
-- **Styling**: Vanilla StyleSheet with central `COLORS` constants.
+- **Logs**: In non-development builds, use `adb logcat *:S ReactNative:V ReactNativeJS:V` to view logs.
+- **Permissions**: The app requires Bluetooth, Location (for discovery), and Camera permissions. These are managed via the custom Expo plugin in `/plugin`.
+- **Mesh Debugging**: Check the `OnlineStatusRow` on the Home screen to see real-time peer connectivity status.

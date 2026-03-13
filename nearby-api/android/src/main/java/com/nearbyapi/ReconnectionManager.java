@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit;
 
 public class ReconnectionManager {
     private static final String TAG = "ReconnectionMgr";
-    private static final int    MAX_RETRIES = 8; restart
+    private static final int    MAX_RETRIES = 8;
     private static final long   INITIAL_BACKOFF = 500; 
     private static final long   MAX_BACKOFF = 10_000;
 
