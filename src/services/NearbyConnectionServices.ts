@@ -286,8 +286,8 @@ async function handleIncomingScan(data: ScanPayload): Promise<void> {
     const tickets = await database
       .get<Ticket>('tickets')
       .query(
-        Q.where('ticket_id', data.ticketId),
-        Q.where('event_id',  data.eventId),
+        Q.where('ticket_id', data.ticketId ?? null),
+        Q.where('event_id',  data.eventId ?? null),
       )
       .fetch();
 
@@ -298,7 +298,7 @@ async function handleIncomingScan(data: ScanPayload): Promise<void> {
     // ── Conflict resolution: first-scan-wins ─────────────────────────────
     const existingLogs = await database
       .get<ScanLog>('scan_logs')
-      .query(Q.where('ticket_id', data.ticketId))
+      .query(Q.where('ticket_id', data.ticketId ?? null))
       .fetch();
 
     if (existingLogs.length > 0) {

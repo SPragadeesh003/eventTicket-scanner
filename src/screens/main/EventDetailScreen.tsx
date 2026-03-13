@@ -30,6 +30,7 @@ import {
 } from '@/src/services/NearbyConnectionServices';
 import type { NearbyDevice } from '@/src/native/NearbyConnections';
 import { styles } from '@/src/styles/main/EventDetailScreenStyles';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 interface EventInfo {
   name:       string;
@@ -172,7 +173,7 @@ export default function EventDetailScreen() {
   };
 
   return (
-    <View style={styles.root}>
+    <SafeAreaView style={styles.root} edges={['bottom']}>
       <StatusBar barStyle="light-content" backgroundColor="#141414" />
 
       <View style={styles.header}>
@@ -312,6 +313,6 @@ export default function EventDetailScreen() {
           </View>
         </View>
       </Modal>
-    </View>
+    </SafeAreaView>
   );
 }

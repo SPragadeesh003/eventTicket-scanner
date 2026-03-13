@@ -1,27 +1,29 @@
 import { database } from '@/src/db/database';
-import { Q }        from '@nozbe/watermelondb';
+import { Q } from '@nozbe/watermelondb';
 import type { Ticket, ScanLog } from '@/src/db/models';
 import { sendScan } from '@/src/services/MeshProtocol';
-import { getMeshName } from '@/src/services/ProfileService';
+import { getProfile } from '@/src/services/ProfileService';
 import type { ScanPayload } from '@/src/services/MeshProtocol';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type ScanResult =
-  | { status: 'valid';     name: string; ticketType: string; ticketId: string }
+  | { status: 'valid'; name: string; ticketType: string; ticketId: string }
   | { status: 'duplicate'; name: string; ticketType: string; ticketId: string }
-  | { status: 'invalid';   name: string; ticketType: string; ticketId: string };
+  | { status: 'invalid'; name: string; ticketType: string; ticketId: string };
 
 // ─── Validate & process a scanned ticket ─────────────────────────────────────
 export async function validateTicket(
-  ticketId:   string,
-  eventId:    string,
-  deviceId:   string,
-  deviceName: string,
-  gateNumber: number,
+  ticketId: string,
+  eventId: string,
+  deviceId: string,
+  deviceName?: string,
+  gateNumber?: number,
 ): Promise<ScanResult> {
   // Guard: if caller forgot to pass deviceName, fall back to cached profile.
   // This prevents 'from: undefined' in mesh payloads.
-  const resolvedDeviceName = deviceName || await getMeshName();
+  const profile = await getProfile();
+  const resolvedDeviceName = deviceName || profile?.meshName || 'Unknown-Gate';
+  const resolvedGateNumber = gateNumber ?? profile?.scannerNumber ?? 1;
   const ticketsCol = database.get<Ticket>('tickets');
 
   // ── 1. Look up ticket ────────────────────────────────────────────────────
@@ -35,10 +37,10 @@ export async function validateTicket(
   if (matches.length === 0) {
     console.log(`[Validate] ❌ INVALID — ticket not found: ${ticketId}`);
     return {
-      status:     'invalid',
-      name:       'Unknown',
+      status: 'invalid',
+      name: 'Unknown',
       ticketType: 'N/A',
-      ticketId:   ticketId || '#INVALID',
+      ticketId: ticketId || '#INVALID',
     };
   }
 
@@ -51,10 +53,10 @@ export async function validateTicket(
   if (ticket.status === 'used') {
     console.log(`[Validate] ⚠️ DUPLICATE — already used: ${ticketId}`);
     return {
-      status:     'duplicate',
-      name:       ticket.name,
+      status: 'duplicate',
+      name: ticket.name,
       ticketType: ticket.ticket_type,
-      ticketId:   ticket.ticket_id,
+      ticketId: ticket.ticket_id,
     };
   }
 
@@ -69,13 +71,13 @@ export async function validateTicket(
 
     // Create exactly ONE scan log — only for valid first scans
     await database.get<ScanLog>('scan_logs').create((log: ScanLog) => {
-      log.ticket_id    = ticket.ticket_id;
-      log.event_id     = eventId;
-      log.device_id    = deviceId;
-      log.gate_number  = gateNumber;
-      log.device_name  = deviceName;
-      log.scanned_at   = scannedAt;
-      log.uploaded     = false;
+      log.ticket_id = ticket.ticket_id;
+      log.event_id = eventId;
+      log.device_id = deviceId;
+      log.gate_number = resolvedGateNumber;
+      log.device_name = resolvedDeviceName;
+      log.scanned_at = scannedAt;
+      log.uploaded = false;
       log.is_duplicate = false;
     });
   });
@@ -86,11 +88,11 @@ export async function validateTicket(
   // ✅ Goes through outbox so it survives if peers aren't connected yet.
   // Fire-and-forget — UI already shows result.
   const payload: ScanPayload = {
-    ticketId:   ticket.ticket_id,
+    ticketId: ticket.ticket_id,
     eventId,
     deviceId,
     deviceName: resolvedDeviceName,
-    gateNumber,
+    gateNumber: resolvedGateNumber,
     scannedAt,
   };
 
@@ -99,9 +101,9 @@ export async function validateTicket(
   );
 
   return {
-    status:     'valid',
-    name:       ticket.name,
+    status: 'valid',
+    name: ticket.name,
     ticketType: ticket.ticket_type,
-    ticketId:   ticket.ticket_id,
+    ticketId: ticket.ticket_id,
   };
 }

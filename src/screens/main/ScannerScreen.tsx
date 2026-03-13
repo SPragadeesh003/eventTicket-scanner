@@ -147,7 +147,7 @@ export default function ScannerScreen() {
     try {
       const result = await validateTicket(value, eventId, deviceIdRef.current);
       if (result.status === 'valid') {
-        await broadcastScan(result.ticketId, eventId, deviceIdRef.current);
+        await broadcastScan(result.ticketId, eventId);
       }
       setScanResult(result);
     } catch (err: any) {
@@ -189,7 +189,7 @@ export default function ScannerScreen() {
       }
       const result = await validateTicket(tickets[0].ticket_id, eventId, deviceIdRef.current);
       if (result.status === 'valid') {
-        await broadcastScan(result.ticketId, eventId, deviceIdRef.current);
+        await broadcastScan(result.ticketId, eventId);
       }
       setScanResult(result);
     } catch (err: any) {
@@ -245,6 +245,7 @@ export default function ScannerScreen() {
           codeTypes: ['qr', 'ean-13', 'ean-8', 'code-128'],
           onCodeScanned: handleCodeScanned,
         }}
+        onError={(err) => console.warn('[Camera Error]', err)}
       />
 
       <View style={styles.overlay}>

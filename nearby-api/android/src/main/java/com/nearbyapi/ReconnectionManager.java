@@ -20,6 +20,9 @@ public class ReconnectionManager {
     private final ReconnectionListener listener;
 
     private final Map<String, ReconnectAttempt> reconnectAttempts = new ConcurrentHashMap<>();
+    // name -> endpointId reverse lookup so we can cancel by device name
+    // (needed when peer reconnects with a NEW endpointId -- old retry loop keeps running)
+    private final Map<String, String> nameToEndpointId = new ConcurrentHashMap<>();
 
     // FIX #6: Store futures so we can cancel them explicitly on shutdown
     private final Map<String, ScheduledFuture<?>> scheduledFutures = new ConcurrentHashMap<>();
@@ -72,6 +75,7 @@ public class ReconnectionManager {
         long backoffMs = Math.min(MAX_BACKOFF, INITIAL_BACKOFF * (long) Math.pow(2, attempt.retryCount));
         attempt.retryCount++;
         reconnectAttempts.put(endpointId, attempt);
+        nameToEndpointId.put(endpointName, endpointId); // track for clearAttemptsByName
 
         Log.d(TAG, "Scheduling reconnect to " + endpointName
             + " (attempt " + attempt.retryCount + "/" + MAX_RETRIES
@@ -98,7 +102,8 @@ public class ReconnectionManager {
     }
 
     public void clearAttempts(String endpointId) {
-        reconnectAttempts.remove(endpointId);
+        ReconnectAttempt attempt = reconnectAttempts.remove(endpointId);
+        if (attempt != null) nameToEndpointId.remove(attempt.endpointName);
 
         // FIX #6: Also cancel any pending future when connection succeeds
         ScheduledFuture<?> future = scheduledFutures.remove(endpointId);
@@ -108,6 +113,25 @@ public class ReconnectionManager {
         }
 
         Log.d(TAG, "Cleared reconnection attempts for: " + endpointId);
+    }
+
+    // Cancel all retries for a device by name regardless of endpointId.
+    // Called when a device reconnects with a NEW endpointId -- the old retry
+    // loop (keyed by old endpointId) would otherwise run to MAX_RETRIES.
+    public void clearAttemptsByName(String deviceName) {
+        String oldEndpointId = nameToEndpointId.remove(deviceName);
+        if (oldEndpointId == null) {
+            Log.d(TAG, "clearAttemptsByName: no stale attempts for " + deviceName);
+            return;
+        }
+        Log.d(TAG, "Clearing stale reconnect loop for " + deviceName
+            + " (old endpointId: " + oldEndpointId + ")");
+        reconnectAttempts.remove(oldEndpointId);
+        ScheduledFuture<?> future = scheduledFutures.remove(oldEndpointId);
+        if (future != null && !future.isDone()) {
+            future.cancel(false);
+            Log.d(TAG, "Cancelled stale retry loop for: " + deviceName);
+        }
     }
 
     public void shutdown() {
@@ -134,6 +158,7 @@ public class ReconnectionManager {
         }
 
         reconnectAttempts.clear();
+        nameToEndpointId.clear();
     }
 
     private static class ReconnectAttempt {
