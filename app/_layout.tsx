@@ -2,10 +2,13 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
+import * as SplashScreen from 'expo-splash-screen';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { ROUTES } from '@/constants/routes';
 import React from 'react';
+
+SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
@@ -21,6 +24,7 @@ export default function RootLayout() {
         <Stack.Screen name={ROUTES.TICKET_SEARCH} options={{ headerShown: false }} />
         <Stack.Screen name={ROUTES.TICKET_DETAIL} options={{ headerShown: false }} />
         <Stack.Screen name={ROUTES.SYNC_STATUS} options={{ headerShown: false }} />
+        <Stack.Screen name={ROUTES.PROFILE} options={{ headerShown: false }} />
       </Stack>
       <StatusBar style="inverted" />
     </ThemeProvider>

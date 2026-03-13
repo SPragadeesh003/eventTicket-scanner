@@ -7,4 +7,5 @@ export const ROUTES = {
   TICKET_SEARCH: 'routes/main/ticket-search/[eventId]' as const,
   TICKET_DETAIL: 'routes/main/ticket-detail/[eventId]' as const,
   SYNC_STATUS: 'routes/main/sync-status/[eventId]' as const,
+  PROFILE: 'routes/main/profile' as const,
 };

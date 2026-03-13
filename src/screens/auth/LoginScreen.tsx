@@ -46,21 +46,17 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
           showsVerticalScrollIndicator={false}
         >
 
-          {/* ── App Icon ─────────────────────────────────── */}
           <View style={styles.iconContainer}>
             <View style={styles.iconBox}>
               <ScanIcon />
             </View>
           </View>
 
-          {/* ── App Title ────────────────────────────────── */}
           <Text style={styles.appTitle}>Event Horizon</Text>
           <Text style={styles.appSubtitle}>Scanner</Text>
 
-          {/* ── Form ─────────────────────────────────────── */}
           <View style={styles.form}>
 
-            {/* Email */}
             <Text style={styles.label}>Email</Text>
             <TextInput
               style={styles.input}
@@ -80,7 +76,6 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
               <Text style={styles.errorText}>{emailError}</Text>
             ) : null}
 
-            {/* Password */}
             <View style={styles.labelRow}>
               <Text style={styles.label}>Password</Text>
               <Text style={styles.required}>*</Text>
@@ -96,7 +91,6 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
               onSubmitEditing={handleLogin}
             />
 
-            {/* Login Button */}
             <TouchableOpacity
               style={[styles.loginBtn, loading && styles.loginBtnDisabled]}
               onPress={handleLogin}
@@ -110,7 +104,6 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
               )}
             </TouchableOpacity>
 
-            {/* Forgot Password */}
             <TouchableOpacity
               onPress={handleForgotPassword}
               activeOpacity={0.7}
@@ -120,8 +113,6 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
             </TouchableOpacity>
 
           </View>
-
-          {/* ── Footer ───────────────────────────────────── */}
           <Text style={styles.footer}>
             Login using your Event Horizon account
           </Text>

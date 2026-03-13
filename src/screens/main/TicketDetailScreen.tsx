@@ -8,83 +8,41 @@ import {
   Alert,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { Q }              from '@nozbe/watermelondb';
-import { database }       from '@/src/db/database';
-import { getDeviceId }    from '@/src/utils/DeviceID';
-import { getProfile }     from '@/src/services/ProfileService';
+import { Q } from '@nozbe/watermelondb';
+import { database } from '@/src/db/database';
+import { getDeviceId } from '@/src/utils/DeviceID';
+import { getProfile } from '@/src/services/ProfileService';
 import { validateTicket } from '@/src/services/ScanService';
-// NOTE: broadcastScan removed — validateTicket calls MeshProtocol.sendScan()
-// internally. No separate broadcast needed here.
 import type { Ticket, ScanLog } from '@/src/db/models';
 import { styles } from '@/src/styles/main/TicketDetailScreenStyles';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+import { TicketDetailCard } from '@/src/components/TicketDetailCard';
+import { formatTicketDateTime } from '@/src/utils/TicketUtils';
+
 interface TicketDetail {
-  ticket_id:   string;
-  name:        string;
+  ticket_id: string;
+  name: string;
   ticket_type: string;
-  status:      string;
-  synced_at:   number;
+  status: string;
+  synced_at: number;
 }
 
 interface ScanInfo {
-  scanned_at:  number;
+  scanned_at: number;
   device_name: string;
 }
 
-function formatType(t: string): string {
-  if (t === 'regular')    return 'General Admission';
-  if (t === 'guest_list') return 'Guest List';
-  if (t === 'external')   return 'External';
-  return t;
-}
-
-function formatDateTime(epochMs: number): string {
-  return new Date(epochMs).toLocaleString('en-GB', {
-    year:   'numeric',
-    month:  '2-digit',
-    day:    '2-digit',
-    hour:   '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).replace(',', '');
-}
-
-// ─── Detail Row ───────────────────────────────────────────────────────────────
-const DetailRow = ({
-  icon,
-  label,
-  value,
-  bold,
-}: {
-  icon:  React.ReactNode;
-  label: string;
-  value: string;
-  bold?: boolean;
-}) => (
-  <View style={styles.detailRow}>
-    <View style={styles.detailIcon}>{icon}</View>
-    <View style={{ flex: 1 }}>
-      <Text style={styles.detailLabel}>{label}</Text>
-      <Text style={[styles.detailValue, bold && styles.detailValueBold]} numberOfLines={1}>
-        {value}
-      </Text>
-    </View>
-  </View>
-);
-
-// ─── Component ───────────────────────────────────────────────────────────────
 export default function TicketDetailScreen() {
   const router = useRouter();
   const { ticketId, eventId } = useLocalSearchParams<{
     ticketId: string;
-    eventId:  string;
+    eventId: string;
   }>();
 
-  const [ticket,   setTicket]   = useState<TicketDetail | null>(null);
+  const [ticket, setTicket] = useState<TicketDetail | null>(null);
   const [scanInfo, setScanInfo] = useState<ScanInfo | null>(null);
-  const [loading,  setLoading]  = useState(true);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => { loadTicket(); }, [ticketId]);
 
@@ -100,11 +58,11 @@ export default function TicketDetailScreen() {
       const t = tickets[0];
 
       setTicket({
-        ticket_id:   t.ticket_id,
-        name:        t.name,
+        ticket_id: t.ticket_id,
+        name: t.name,
         ticket_type: t.ticket_type,
-        status:      t.status,
-        synced_at:   t.synced_at,
+        status: t.status,
+        synced_at: t.synced_at,
       });
 
       if (t.status === 'used') {
@@ -123,7 +81,6 @@ export default function TicketDetailScreen() {
     }
   };
 
-  // ── Validate ──────────────────────────────────────────────────────────────
   const handleValidate = async () => {
     if (!ticket) return;
 
@@ -136,12 +93,8 @@ export default function TicketDetailScreen() {
           text: 'Validate',
           onPress: async () => {
             try {
-              // Use validateTicket (same as QR scan path) so that:
-              //  1. Duplicate/invalid guards are applied consistently
-              //  2. MeshProtocol.sendScan() is called automatically
-              //  3. scan_log is created with correct gate/device info from profile
               const deviceId = await getDeviceId();
-              const profile  = await getProfile();
+              const profile = await getProfile();
 
               const result = await validateTicket(
                 ticketId,
@@ -152,7 +105,6 @@ export default function TicketDetailScreen() {
               );
 
               if (result.status === 'valid') {
-                // Refresh local state from DB so UI reflects the change
                 setTicket(prev => prev ? { ...prev, status: 'used' } : null);
                 const logs = await database
                   .get<ScanLog>('scan_logs')
@@ -164,7 +116,6 @@ export default function TicketDetailScreen() {
                 }
               } else if (result.status === 'duplicate') {
                 Alert.alert('Already Scanned', 'This ticket was already validated.');
-                // Refresh to show latest scan info
                 await loadTicket();
               } else {
                 Alert.alert('Invalid Ticket', 'This ticket is not valid for this event.');
@@ -178,7 +129,6 @@ export default function TicketDetailScreen() {
     );
   };
 
-  // ── Loading / not found ───────────────────────────────────────────────────
   if (loading || !ticket) {
     return (
       <View style={styles.root}>
@@ -202,7 +152,7 @@ export default function TicketDetailScreen() {
   const isUsed = ticket.status === 'used';
 
   return (
-    <View style={styles.root}>
+    <SafeAreaView style={styles.root} edges={['bottom']}>
       <StatusBar barStyle="light-content" backgroundColor="#141414" />
 
       <View style={styles.header}>
@@ -214,8 +164,6 @@ export default function TicketDetailScreen() {
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
-
-        {/* Status badge */}
         <View style={styles.badgeRow}>
           <View style={[styles.badge, isUsed ? styles.badgeUsed : styles.badgeValid]}>
             <Text style={[styles.badgeText, isUsed ? styles.badgeTextUsed : styles.badgeTextValid]}>
@@ -224,52 +172,13 @@ export default function TicketDetailScreen() {
           </View>
         </View>
 
-        {/* Ticket info card */}
-        <View style={styles.card}>
-          <Text style={styles.cardName}>{ticket.name}</Text>
-          <Text style={styles.cardType}>{formatType(ticket.ticket_type)}</Text>
-
-          <View style={styles.divider} />
-
-          <DetailRow
-            icon={<View style={styles.hashIcon}><Text style={styles.hashText}>#</Text></View>}
-            label="Ticket ID"
-            value={ticket.ticket_id}
-            bold
-          />
-
-          <DetailRow
-            icon={<View style={styles.typeIcon} />}
-            label="Ticket Type"
-            value={formatType(ticket.ticket_type)}
-          />
-
-          <DetailRow
-            icon={<View style={styles.calIcon} />}
-            label="Synced At"
-            value={formatDateTime(ticket.synced_at)}
-          />
-
-          {isUsed && scanInfo && (
-            <>
-              <View style={styles.divider} />
-              <DetailRow
-                icon={<View style={[styles.checkIcon, styles.checkIconGreen]} />}
-                label="Scanned At"
-                value={formatDateTime(scanInfo.scanned_at)}
-              />
-              <DetailRow
-                icon={<View style={[styles.checkIcon, styles.checkIconGreen]} />}
-                label="Scanned By"
-                value={scanInfo.device_name}
-              />
-            </>
-          )}
-        </View>
-
+        <TicketDetailCard
+          ticket={ticket}
+          scanInfo={scanInfo}
+          isUsed={isUsed}
+        />
       </ScrollView>
 
-      {/* Bottom action */}
       <View style={styles.bottomBar}>
         {isUsed ? (
           <View style={styles.alreadyScannedBanner}>
@@ -281,6 +190,6 @@ export default function TicketDetailScreen() {
           </TouchableOpacity>
         )}
       </View>
-    </View>
+    </SafeAreaView>
   );
 }

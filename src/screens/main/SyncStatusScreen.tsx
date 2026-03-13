@@ -23,12 +23,11 @@ import {
   getDiscoveredDevices,
   connectToDevice,
   type NearbyCallbacks,
-} from '@/src/services/NearbyConnectionServices';
-import type { NearbyDevice } from '@/src/native/NearbyConnections';
+} from '@/src/services/NearbyService';
+import type { NearbyDevice } from '@/src/types/Nearby.types';
 import type { Ticket, ScanLog, SyncedEvent } from '@/src/db/models';
 import { styles } from '@/src/styles/main/SyncStatusScreenStyles';
 
-// ─── Types ────────────────────────────────────────────────────
 interface LocalStats {
   ticketsDownloaded: number;
   pendingUploads: number;
@@ -37,7 +36,6 @@ interface LocalStats {
 
 type SyncPhase = 'idle' | 'syncing' | 'done' | 'error';
 
-// ─── Upload pending scan logs to Supabase ─────────────────────
 async function uploadPendingScans(
   eventId: string,
   onProgress: (pct: number) => void,
@@ -88,7 +86,6 @@ async function uploadPendingScans(
   }
 }
 
-// ─── Component ───────────────────────────────────────────────
 export default function SyncStatusScreen() {
   const router = useRouter();
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
@@ -102,8 +99,7 @@ export default function SyncStatusScreen() {
   const [phase, setPhase] = useState<SyncPhase>('idle');
   const [syncPct, setSyncPct] = useState(0);
   const [deviceId, setDeviceId] = useState('');
-  
-  // Mesh state
+
   const [peers, setPeers] = useState<NearbyDevice[]>([]);
   const [foundDevices, setFoundDevices] = useState<NearbyDevice[]>([]);
   const [isMeshActive, setIsMeshActive] = useState(false);
@@ -157,14 +153,12 @@ export default function SyncStatusScreen() {
     getDeviceId().then(setDeviceId);
     loadStats();
 
-    // ── Mesh Listeners ──────────────────────────────────────
     const callbacks: NearbyCallbacks = {
-      onDeviceConnected:    () => { refreshNearby(); setIsMeshActive(true); },
+      onDeviceConnected: () => { refreshNearby(); setIsMeshActive(true); },
       onDeviceDisconnected: () => { refreshNearby(); },
-      onDeviceFound:        () => { refreshNearby(); },
+      onDeviceFound: () => { refreshNearby(); },
     };
 
-    // Start mesh (will initialize advertising/discovery globally)
     startNearbyService(callbacks).then(() => {
       if (mountedRef.current) {
         setIsMeshActive(true);
@@ -183,7 +177,6 @@ export default function SyncStatusScreen() {
     };
   }, []);
 
-  // ── Animate progress bar ───────────────────────────────────
   useEffect(() => {
     Animated.timing(progressAnim, {
       toValue: syncPct / 100,
@@ -192,19 +185,16 @@ export default function SyncStatusScreen() {
     }).start();
   }, [syncPct]);
 
-  // ── Sync Now ───────────────────────────────────────────────
   const handleSyncNow = async () => {
     if (!isOnline || phase === 'syncing') return;
     setPhase('syncing');
     setSyncPct(0);
 
     try {
-      // Phase 1: upload scan logs (0 → 50%)
       await uploadPendingScans(eventId, (pct) => {
         if (mountedRef.current) setSyncPct(Math.round(pct * 0.5));
       });
 
-      // Phase 2: re-download tickets (50 → 100%)
       const syncRecords = await database
         .get<SyncedEvent>('synced_events')
         .query(Q.where('event_id', eventId))
@@ -227,8 +217,6 @@ export default function SyncStatusScreen() {
       if (mountedRef.current) setPhase('error');
     }
   };
-
-  // ── Derived ────────────────────────────────────────────────
   const isSyncing = phase === 'syncing';
   const btnLabel = isSyncing
     ? `Syncing... ${syncPct}%`
@@ -242,7 +230,6 @@ export default function SyncStatusScreen() {
     outputRange: ['0%', '100%'],
   });
 
-  // ── Manual Connect ────────────────────────────────────────
   const handleManualConnect = async (device: NearbyDevice) => {
     const ok = await connectToDevice(device.endpointId, device.deviceName);
     if (!ok) {
@@ -255,8 +242,6 @@ export default function SyncStatusScreen() {
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor="#141414" />
-
-      {/* ── Header ─────────────────────────────────────────── */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} activeOpacity={0.7}>
           <View style={styles.backArrow} />
@@ -267,7 +252,6 @@ export default function SyncStatusScreen() {
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
 
-        {/* ── Online badge ───────────────────────────────────── */}
         <View style={styles.badgeRow}>
           <View style={[styles.badge, isOnline ? styles.badgeOnline : styles.badgeOffline]}>
             <View style={[styles.badgeDot, isOnline ? styles.dotGreen : styles.dotGray]} />
@@ -277,7 +261,6 @@ export default function SyncStatusScreen() {
           </View>
         </View>
 
-        {/* ── Mesh Network card ──────────────────────────────── */}
         <View style={styles.card}>
           <View style={[styles.cardIconWrap, { backgroundColor: isMeshActive ? '#1A3D5A' : '#2A2A2A' }]}>
             <View style={[styles.badgeDot, { backgroundColor: isMeshActive ? '#4A7FA5' : '#888888' }]} />
@@ -292,7 +275,6 @@ export default function SyncStatusScreen() {
           </View>
         </View>
 
-        {/* ── Connected devices list ─────────────────────────── */}
         {peers.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Connected Devices</Text>
@@ -313,22 +295,21 @@ export default function SyncStatusScreen() {
           </>
         )}
 
-        {/* ── Found (Discovered) devices list ────────────────── */}
         {foundDevices.length > 0 && (
           <>
             <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Nearby Devices Found</Text>
             {foundDevices.map(device => (
               <View key={device.endpointId} style={styles.dataRow}>
                 <View style={styles.dataIconWrap}>
-                   <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#888' }} />
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#888' }} />
                 </View>
                 <View style={styles.dataText}>
                   <Text style={styles.dataTitle}>{device.deviceName}</Text>
                   <Text style={styles.dataSub}>Visible but not linked</Text>
                 </View>
-                <TouchableOpacity 
-                   style={styles.meshActionBtn} 
-                   onPress={() => handleManualConnect(device)}
+                <TouchableOpacity
+                  style={styles.meshActionBtn}
+                  onPress={() => handleManualConnect(device)}
                 >
                   <Text style={styles.meshActionText}>Connect</Text>
                 </TouchableOpacity>
@@ -337,7 +318,6 @@ export default function SyncStatusScreen() {
           </>
         )}
 
-        {/* ── Offline mode card ──────────────────────────────── */}
         <View style={styles.card}>
           <View style={styles.cardIconWrap}>
             <View style={styles.wifiBase} />
@@ -351,7 +331,6 @@ export default function SyncStatusScreen() {
           </View>
         </View>
 
-        {/* ── Data Stored Locally ────────────────────────────── */}
         <Text style={styles.sectionTitle}>Data Stored Locally</Text>
 
         <View style={styles.dataRow}>
@@ -382,7 +361,6 @@ export default function SyncStatusScreen() {
           </View>
         </View>
 
-        {/* ── Sync button ────────────────────────────────────── */}
         <TouchableOpacity
           style={[
             styles.syncBtn,
@@ -396,7 +374,6 @@ export default function SyncStatusScreen() {
           <Text style={styles.syncBtnText}>{btnLabel}</Text>
         </TouchableOpacity>
 
-        {/* ── Progress card ──────────────────────────────────── */}
         {isSyncing && (
           <View style={styles.progressCard}>
             <Text style={styles.progressTitle}>Syncing Data</Text>
@@ -407,7 +384,6 @@ export default function SyncStatusScreen() {
           </View>
         )}
 
-        {/* ── Last Successful Sync ───────────────────────────── */}
         <View style={styles.lastSyncRow}>
           <Text style={styles.lastSyncLabel}>Last Successful Sync</Text>
           <Text style={styles.lastSyncValue}>{formatLastSync(localStats.lastSyncedAt)}</Text>

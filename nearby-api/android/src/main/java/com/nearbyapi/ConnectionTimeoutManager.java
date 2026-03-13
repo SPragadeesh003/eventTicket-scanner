@@ -10,22 +10,17 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public class ConnectionTimeoutManager {
-    private static final String TAG                = "TimeoutManager";
-    private static final long   CONNECTION_TIMEOUT = 30000; // 30 seconds
+    private static final String TAG = "TimeoutManager";
+    private static final long   CONNECTION_TIMEOUT = 30000;
 
     private final Map<String, ScheduledFuture<?>> timeoutTasks = new ConcurrentHashMap<>();
 
-    // FIX #7: Non-final so it can be recreated after shutdown
     private ScheduledExecutorService executor;
     private volatile boolean isShutdown = false;
 
     public ConnectionTimeoutManager() {
         this.executor = Executors.newScheduledThreadPool(1);
     }
-
-    // FIX #7: Lazy executor getter — recreates if previously shut down
-    // This is called by startConnectionTimeout() which may be called after
-    // a stop()/start() cycle on the Nearby service
     private ScheduledExecutorService getExecutor() {
         if (executor == null || executor.isShutdown()) {
             Log.d(TAG, "Recreating executor after shutdown");
@@ -38,10 +33,8 @@ public class ConnectionTimeoutManager {
     public void startConnectionTimeout(String endpointId, Runnable onTimeout) {
         if (isShutdown) {
             Log.w(TAG, "Manager was shutdown — recreating executor for: " + endpointId);
-            // getExecutor() will recreate it
         }
 
-        // Cancel any existing timeout for this endpoint before starting a new one
         cancelTimeout(endpointId);
 
         Log.d(TAG, "Starting " + CONNECTION_TIMEOUT + "ms timeout for: " + endpointId);
@@ -71,7 +64,6 @@ public class ConnectionTimeoutManager {
         isShutdown = true;
         Log.d(TAG, "Shutting down ConnectionTimeoutManager");
 
-        // Cancel all pending timeouts explicitly
         for (Map.Entry<String, ScheduledFuture<?>> entry : timeoutTasks.entrySet()) {
             entry.getValue().cancel(false);
         }

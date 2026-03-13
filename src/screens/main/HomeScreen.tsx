@@ -9,52 +9,24 @@ import {
   Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import NetInfo from '@react-native-community/netinfo';
 import { supabase } from '@/src/lib/supabase';
 import { styles } from '@/src/styles/main/HomeScreenStyles';
 import { ROUTES } from '@/constants/routes';
+import {
+  startNearbyService,
+  stopListening,
+  getConnectedDevices,
+} from '@/src/services/NearbyService';
+import type { NearbyDevice } from '@/src/types/Nearby.types';
+import { Event } from '@/src/types/Event.types';
 
-// ─── Types ────────────────────────────────────────────────────
-interface Event {
-  id:         string;
-  name:       string;
-  venue:      string;
-  event_date: string;
-  status:     'current' | 'past';
-}
+import { EventCard } from '@/src/components/EventCard';
+import { OnlineStatusRow } from '@/src/components/OnlineStatusRow';
+import { getLocalEventStats } from '@/src/services/TicketSync';
 
 type Tab = 'current' | 'past';
 
-// ─── Helpers ──────────────────────────────────────────────────
-function formatDate(dateStr: string): string {
-  const date = new Date(dateStr);
-  return date.toLocaleDateString('en-GB', {
-    weekday: 'short',
-    day:     '2-digit',
-    month:   'short',
-    year:    'numeric',
-  });
-}
-
-// ─── Icons (pure RN — no lib needed) ─────────────────────────
-const CalendarIcon = () => (
-  <View style={styles.iconWrap}>
-    <View style={styles.calendarOuter}>
-      <View style={styles.calendarTop} />
-      <View style={styles.calendarBody} />
-    </View>
-  </View>
-);
-
-const LocationIcon = () => (
-  <View style={styles.iconWrap}>
-    <View style={styles.locationPin} />
-    <View style={styles.locationDot} />
-  </View>
-);
-
-const ChevronIcon = () => (
-  <View style={styles.chevron} />
-);
 
 const UserIcon = () => (
   <View style={styles.userIconWrap}>
@@ -70,40 +42,24 @@ const LogoutIcon = () => (
   </View>
 );
 
-// ─── Event Card ───────────────────────────────────────────────
-const EventCard = ({ item, onPress }: { item: Event; onPress: () => void }) => (
-  <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.75}>
-    <View style={styles.cardContent}>
-      <Text style={styles.cardTitle}>{item.name}</Text>
-      <View style={styles.cardMeta}>
-        <CalendarIcon />
-        <Text style={styles.cardMetaText}>{formatDate(item.event_date)}</Text>
-      </View>
-      <View style={styles.cardMeta}>
-        <LocationIcon />
-        <Text style={styles.cardMetaText}>{item.venue}</Text>
-      </View>
-    </View>
-    <ChevronIcon />
-  </TouchableOpacity>
-);
-
-// ─── Component ───────────────────────────────────────────────
 export default function HomeScreen() {
   const router               = useRouter();
   const [activeTab, setTab]    = useState<Tab>('current');
   const [events,    setEvents] = useState<Event[]>([]);
   const [loading,   setLoading] = useState(true);
   const [userName,  setUserName] = useState('');
+  const [isOnline,  setIsOnline] = useState(true);
+  const [lastSync,  setLastSync] = useState<number | null>(null);
+  const [peers,     setPeers]    = useState<NearbyDevice[]>([]);
 
-  // ── Load profile + events ───────────────────────────────────
+  const mountedRef = React.useRef(true);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      // Fetch profile name
       const { data: profile } = await supabase
         .from('profiles')
         .select('full_name')
@@ -112,7 +68,6 @@ export default function HomeScreen() {
 
       if (profile) setUserName(profile.full_name);
 
-      // Fetch events by tab
       const { data: eventsData, error } = await supabase
         .from('events')
         .select('id, name, venue, event_date, status')
@@ -129,9 +84,36 @@ export default function HomeScreen() {
     }
   }, [activeTab]);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { 
+    mountedRef.current = true;
+    loadData();
 
-  // ── Logout ──────────────────────────────────────────────────
+    const unsubNet = NetInfo.addEventListener(state => {
+      if (mountedRef.current) setIsOnline(!!state.isConnected);
+    });
+
+    const initNearby = async () => {
+      await startNearbyService({
+        onDeviceConnected: async () => {
+          const d = await getConnectedDevices();
+          if (mountedRef.current) setPeers(d);
+        },
+        onDeviceDisconnected: async () => {
+          const d = await getConnectedDevices();
+          if (mountedRef.current) setPeers(d);
+        },
+      });
+    };
+
+    initNearby();
+
+    return () => {
+      mountedRef.current = false;
+      unsubNet();
+      stopListening();
+    };
+  }, [loadData]);
+
   const handleLogout = () => {
     Alert.alert(
       'Log Out',
@@ -150,7 +132,6 @@ export default function HomeScreen() {
     );
   };
 
-  // ── Navigate to event detail ────────────────────────────────
   const handleEventPress = (event: Event) => {
     router.push({
       pathname: `/${ROUTES.EVENT_DETAIL}`,
@@ -158,7 +139,6 @@ export default function HomeScreen() {
     });
   };
 
-  // ── Empty state ─────────────────────────────────────────────
   const renderEmpty = () => (
     <View style={styles.emptyWrap}>
       <Text style={styles.emptyText}>
@@ -177,10 +157,12 @@ export default function HomeScreen() {
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor="#141414" />
-
-      {/* ── Top Bar ────────────────────────────────────────── */}
       <View style={styles.topBar}>
-        <TouchableOpacity style={styles.topBarBtn} activeOpacity={0.7}>
+        <TouchableOpacity 
+          style={styles.topBarBtn} 
+          activeOpacity={0.7}
+          onPress={() => router.push(`/${ROUTES.PROFILE}`)}
+        >
           <UserIcon />
         </TouchableOpacity>
 
@@ -195,7 +177,6 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* ── Tabs ───────────────────────────────────────────── */}
       <View style={styles.tabRow}>
         {(['current', 'past'] as Tab[]).map(tab => (
           <TouchableOpacity
@@ -212,7 +193,6 @@ export default function HomeScreen() {
         ))}
       </View>
 
-      {/* ── Event List ─────────────────────────────────────── */}
       {loading ? (
         <View style={styles.loaderWrap}>
           <ActivityIndicator color="#00C896" size="large" />

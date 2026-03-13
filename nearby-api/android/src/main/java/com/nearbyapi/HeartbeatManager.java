@@ -16,31 +16,21 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class HeartbeatManager {
     private static final String TAG = "HeartbeatManager";
 
-    // Send a heartbeat ping every 8 seconds
-    private static final long HEARTBEAT_INTERVAL_MS       = 8_000;
+    private static final long HEARTBEAT_INTERVAL_MS = 8_000;
 
-    // Declare ghost after 3 consecutive missed responses = 24 seconds
     private static final int  MISSED_BEATS_BEFORE_TIMEOUT = 3;
     private static final long TIMEOUT_MS =
         HEARTBEAT_INTERVAL_MS * MISSED_BEATS_BEFORE_TIMEOUT;
 
-    // After a payload burst (sync), Nearby's send queue may be full.
-    // sendPayload() will throw or return a failed Task for queued heartbeats.
-    // If we see N consecutive SEND failures (not receive failures), declare
-    // the channel stalled immediately — don't wait the full 24s.
     private static final int CONSECUTIVE_SEND_FAILURES_BEFORE_TIMEOUT = 3;
 
     private final Context                context;
     private final HeartbeatListener      listener;
     private final Map<String, String>    connectedEndpoints;
 
-    // lastHeartbeatTime: when we last RECEIVED a beat from this endpoint
     private final Map<String, Long>    lastHeartbeatTime     = new ConcurrentHashMap<>();
-    // lastSentTime: when we last successfully SENT a beat to this endpoint
     private final Map<String, Long>    lastSentTime          = new ConcurrentHashMap<>();
-    // Consecutive missed RESPONSES (peer not sending back)
     private final Map<String, Integer> missedBeatsCount      = new ConcurrentHashMap<>();
-    // Consecutive SEND failures (our send() call itself is failing)
     private final Map<String, AtomicInteger> sendFailCount   = new ConcurrentHashMap<>();
 
     private ScheduledFuture<?>       monitorTask;
@@ -59,9 +49,6 @@ public class HeartbeatManager {
         this.listener           = listener;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  START GLOBAL MONITOR
-    // ─────────────────────────────────────────────────────────────────────────
     public void startHeartbeat() {
         if (executor == null || executor.isShutdown()) {
             executor   = Executors.newScheduledThreadPool(1);
@@ -82,10 +69,6 @@ public class HeartbeatManager {
         Log.d(TAG, "Heartbeat started — interval=" + HEARTBEAT_INTERVAL_MS
             + "ms, timeout after " + MISSED_BEATS_BEFORE_TIMEOUT + " missed beats");
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  MONITOR CYCLE — runs every HEARTBEAT_INTERVAL_MS
-    // ─────────────────────────────────────────────────────────────────────────
     private void runMonitorCycle() {
         if (isShutdown) return;
 
@@ -93,7 +76,6 @@ public class HeartbeatManager {
 
         for (String endpointId : lastHeartbeatTime.keySet()) {
 
-            // Remove tracking for peers that are no longer connected
             if (!connectedEndpoints.containsKey(endpointId)) {
                 cleanupEndpoint(endpointId);
                 continue;
@@ -103,7 +85,6 @@ public class HeartbeatManager {
             long timeSinceLast = now - lastReceived;
 
             if (timeSinceLast > TIMEOUT_MS) {
-                // ── Missed response window exceeded ───────────────────────────
                 int missed = missedBeatsCount.getOrDefault(endpointId, 0) + 1;
                 missedBeatsCount.put(endpointId, missed);
 
@@ -115,20 +96,15 @@ public class HeartbeatManager {
                     continue;
                 }
             } else {
-                // Response received recently — reset missed counter
                 missedBeatsCount.put(endpointId, 0);
                 sendFailCount.computeIfAbsent(endpointId,
                     k -> new AtomicInteger(0)).set(0);
             }
 
-            // Always send a beat on every cycle
             sendHeartbeat(endpointId, now);
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PER-ENDPOINT TRACKING
-    // ─────────────────────────────────────────────────────────────────────────
     public void startHeartbeatForEndpoint(String endpointId) {
         if (isShutdown) return;
         long now = System.currentTimeMillis();
@@ -138,7 +114,6 @@ public class HeartbeatManager {
         sendFailCount.put(endpointId, new AtomicInteger(0));
         Log.d(TAG, "Tracking heartbeat for: " + endpointId);
 
-        // Immediate beat so peer knows we're alive right away
         sendHeartbeat(endpointId, now);
     }
 
@@ -152,20 +127,9 @@ public class HeartbeatManager {
         lastHeartbeatTime.put(endpointId, System.currentTimeMillis());
         missedBeatsCount.put(endpointId, 0);
         AtomicInteger fc = sendFailCount.get(endpointId);
-        if (fc != null) fc.set(0); // receiving means channel is alive — reset send fails too
+        if (fc != null) fc.set(0);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  POST-BURST PROBE
-    //
-    //  Called by NearbyConnectionsModule after broadcastPayload() completes
-    //  a sync burst (multiple payloads sent back-to-back to a new peer).
-    //
-    //  After a burst, Nearby's send queue may be saturated. We schedule a
-    //  probe 2 seconds later — if it fails or gets no response within one
-    //  heartbeat interval, we declare the connection stalled immediately
-    //  instead of waiting the full 24-second timeout.
-    // ─────────────────────────────────────────────────────────────────────────
     public void schedulePostBurstProbe(String endpointId) {
         if (isShutdown || executor == null || executor.isShutdown()) return;
 
@@ -180,13 +144,9 @@ public class HeartbeatManager {
         }, 2_000, TimeUnit.MILLISECONDS);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  SEND HEARTBEAT
-    // ─────────────────────────────────────────────────────────────────────────
     private void sendHeartbeat(String endpointId, long now) {
         lastSentTime.put(endpointId, now);
         try {
-            // Fresh Payload each time — Nearby deduplicates by payload ID
             Payload beat = Payload.fromBytes(new byte[]{0x00});
             Nearby.getConnectionsClient(context)
                   .sendPayload(endpointId, beat)
@@ -200,8 +160,6 @@ public class HeartbeatManager {
                       Log.w(TAG, "Heartbeat SEND failed (#" + fails + ") for "
                           + endpointId + ": " + e.getMessage());
 
-                      // If the send itself is failing repeatedly, the channel is
-                      // stalled — don't wait for the full response timeout.
                       if (fails >= CONSECUTIVE_SEND_FAILURES_BEFORE_TIMEOUT) {
                           declareTimeout(endpointId,
                               "send failed " + fails + " times consecutively");
@@ -219,9 +177,6 @@ public class HeartbeatManager {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  DECLARE TIMEOUT
-    // ─────────────────────────────────────────────────────────────────────────
     private void declareTimeout(String endpointId, String reason) {
         if (!lastHeartbeatTime.containsKey(endpointId)) return; // already timed out
 
@@ -236,10 +191,6 @@ public class HeartbeatManager {
         missedBeatsCount.remove(endpointId);
         sendFailCount.remove(endpointId);
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  SHUTDOWN
-    // ─────────────────────────────────────────────────────────────────────────
     public void shutdown() {
         isShutdown = true;
 

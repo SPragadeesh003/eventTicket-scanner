@@ -1,31 +1,19 @@
-/**
- * ProfileService.ts
- *
- * Caches the logged-in user's profile to AsyncStorage after login.
- * Used by the mesh to get the correct device name without hitting Supabase.
- *
- * Storage key: @profile
- * Shape: { fullName, scannerNumber, deviceName, userId }
- */
-
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const PROFILE_KEY = '@profile';
 
 export interface CachedProfile {
-  userId:        string;
-  fullName:      string;
+  userId: string;
+  fullName: string;
   scannerNumber: number;
-  deviceName:    string;  // physical device name e.g. "Galaxy A52s"
-  meshName:      string;  // e.g. "Gatekeeper 1 - Gate 1"
+  deviceName: string;
+  meshName: string;
 }
-
-// ─── Save after login ─────────────────────────────────────────────────────────
 export async function saveProfile(
-  userId:        string,
-  fullName:      string,
+  userId: string,
+  fullName: string,
   scannerNumber: number,
-  deviceName:    string,
+  deviceName: string,
 ): Promise<void> {
   const profile: CachedProfile = {
     userId,
@@ -38,7 +26,6 @@ export async function saveProfile(
   console.log(`[ProfileService] Saved profile: ${profile.meshName}`);
 }
 
-// ─── Get cached profile (works fully offline) ─────────────────────────────────
 export async function getProfile(): Promise<CachedProfile | null> {
   try {
     const raw = await AsyncStorage.getItem(PROFILE_KEY);
@@ -49,7 +36,6 @@ export async function getProfile(): Promise<CachedProfile | null> {
   }
 }
 
-// ─── Get just the mesh name (used by startMesh) ───────────────────────────────
 export async function getMeshName(): Promise<string> {
   const profile = await getProfile();
   if (!profile) {
@@ -59,7 +45,6 @@ export async function getMeshName(): Promise<string> {
   return profile.meshName;
 }
 
-// ─── Clear on logout ──────────────────────────────────────────────────────────
 export async function clearProfile(): Promise<void> {
   await AsyncStorage.removeItem(PROFILE_KEY);
   console.log('[ProfileService] Profile cleared');

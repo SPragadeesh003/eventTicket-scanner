@@ -1,16 +1,10 @@
 import { StyleSheet, Platform } from 'react-native';
-
-const DARK_BG  = '#141414';
-const CARD_BG  = '#1E1E1E';
-const WHITE    = '#FFFFFF';
-const GRAY     = '#888888';
-const GREEN    = '#00C896';
-const BORDER   = '#2A2A2A';
+import { COLORS } from '@/constants/color';
 
 export const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: DARK_BG,
+    backgroundColor: COLORS.DARK_BG,
   },
 
   // ── Header ──
@@ -29,18 +23,18 @@ export const styles = StyleSheet.create({
   backArrow: {
     width: 10, height: 10,
     borderLeftWidth: 2, borderBottomWidth: 2,
-    borderColor: WHITE,
+    borderColor: COLORS.WHITE,
     transform: [{ rotate: '45deg' }],
   },
   headerTitle: {
-    fontSize: 18, fontWeight: '700', color: WHITE,
+    fontSize: 18, fontWeight: '700', color: COLORS.WHITE,
   },
 
   // ── Search bar ──
   searchBarWrap: {
     flexDirection:     'row',
     alignItems:        'center',
-    backgroundColor:    CARD_BG,
+    backgroundColor:    COLORS.CARD_BG,
     marginHorizontal:   16,
     marginBottom:       12,
     borderRadius:       12,
@@ -55,12 +49,12 @@ export const styles = StyleSheet.create({
   searchCircle: {
     width: 11, height: 11,
     borderRadius: 6,
-    borderWidth: 2, borderColor: GRAY,
+    borderWidth: 2, borderColor: COLORS.GRAY,
     position: 'absolute', top: 0, left: 0,
   },
   searchHandle: {
     width: 2, height: 6,
-    backgroundColor: GRAY,
+    backgroundColor: COLORS.GRAY,
     position: 'absolute', bottom: 0, right: 1,
     borderRadius: 1,
     transform: [{ rotate: '45deg' }],
@@ -68,7 +62,7 @@ export const styles = StyleSheet.create({
   searchInput: {
     flex: 1,
     fontSize: 15,
-    color: WHITE,
+    color: COLORS.WHITE,
     paddingVertical: 6,
   },
 
@@ -85,14 +79,15 @@ export const styles = StyleSheet.create({
     paddingBottom: 32,
   },
   sectionHeader: {
-    backgroundColor: DARK_BG,
+    backgroundColor: COLORS.DARK_BG,
     paddingVertical:  6,
     paddingLeft:      4,
+    height:           32, // Fixed height for getItemLayout
   },
   sectionLetter: {
     fontSize:   14,
     fontWeight: '700',
-    color:      GRAY,
+    color:      COLORS.GRAY,
     letterSpacing: 0.5,
   },
 
@@ -100,7 +95,7 @@ export const styles = StyleSheet.create({
   ticketItem: {
     flexDirection:   'row',
     alignItems:      'center',
-    backgroundColor:  CARD_BG,
+    backgroundColor:  COLORS.CARD_BG,
     borderRadius:    12,
     marginBottom:     8,
     paddingHorizontal: 14,
@@ -114,12 +109,12 @@ export const styles = StyleSheet.create({
   ticketName: {
     fontSize:   15,
     fontWeight: '600',
-    color:      WHITE,
+    color:      COLORS.WHITE,
     marginBottom: 4,
   },
   ticketMeta: {
     fontSize: 12,
-    color:    GRAY,
+    color:    COLORS.GRAY,
   },
 
   // ── Status badge ──
@@ -132,34 +127,36 @@ export const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,200,150,0.15)',
   },
   badgeScanned: {
-    backgroundColor: '#2A2A2A',
+    backgroundColor: COLORS.BORDER,
   },
   statusText: {
     fontSize:   12,
     fontWeight: '600',
   },
-  statusGreen: { color: GREEN },
-  statusGray:  { color: GRAY },
+  statusGreen: { color: COLORS.SUCCESS },
+  statusGray:  { color: COLORS.GRAY },
 
   // ── A-Z sidebar ──
   sidebar: {
     position:       'absolute',
-    right:           4,
+    right:           8,
     top:             0,
     bottom:          0,
     justifyContent: 'center',
     alignItems:     'center',
     paddingVertical: 8,
+    zIndex:          10,
+    backgroundColor: 'transparent',
   },
   sidebarBtn: {
-    paddingVertical:    1.5,
-    paddingHorizontal:  4,
+    paddingVertical:    2,
+    paddingHorizontal:  8,
     alignItems:        'center',
   },
   sidebarLetter: {
     fontSize:   11,
     fontWeight: '600',
-    color:      GRAY,
+    color:      COLORS.GRAY,
   },
 
   // ── Empty ──
@@ -169,6 +166,6 @@ export const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 15,
-    color:    GRAY,
+    color:    COLORS.GRAY,
   },
 });

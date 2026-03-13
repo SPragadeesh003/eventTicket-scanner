@@ -17,7 +17,6 @@ import sectionListGetItemLayout from 'react-native-section-list-get-item-layout'
 import type { Ticket } from '@/src/db/models';
 import { styles } from '@/src/styles/main/TicketSearchScreenStyles';
 
-// ─── Types ────────────────────────────────────────────────────
 interface TicketRow {
   id: string;
   ticket_id: string;
@@ -92,14 +91,14 @@ export default function TicketSearchScreen() {
 
   useEffect(() => {
     getDeviceId().then(setDeviceId);
-    performSearch(''); 
+    performSearch('');
   }, [eventId]);
 
   const performSearch = async (text: string) => {
     try {
       setLoading(true);
       const q = text.trim();
-      
+
       let queryConstraints: any[] = [
         Q.where('event_id', eventId),
         Q.sortBy('name', Q.asc),
@@ -145,13 +144,15 @@ export default function TicketSearchScreen() {
   };
 
   const handleAlphaPress = (letter: string) => {
-    const idx = sections.findIndex(s => s.letter === letter);
+    // Find the first section that is equal to or follows the clicked letter
+    const idx = sections.findIndex(s => s.letter >= letter);
     if (idx < 0) return;
+    
     try {
       listRef.current?.scrollToLocation({
         sectionIndex: idx,
         itemIndex: 0,
-        animated: true,
+        animated: false, // Instant scroll feels better for sidebar on many devices
         viewOffset: 0,
       });
     } catch (e) {

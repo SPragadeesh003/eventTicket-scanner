@@ -11,23 +11,19 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public class ReconnectionManager {
-    private static final String TAG          = "ReconnectionMgr";
-    private static final int    MAX_RETRIES     = 8;    // more attempts before handing off to discovery restart
-    private static final long   INITIAL_BACKOFF = 500;  // 0.5s, 1s, 2s, 4s, 8s, 10s, 10s, 10s
-    private static final long   MAX_BACKOFF     = 10_000; // cap at 10s -- no huge gaps
+    private static final String TAG = "ReconnectionMgr";
+    private static final int    MAX_RETRIES = 8; restart
+    private static final long   INITIAL_BACKOFF = 500; 
+    private static final long   MAX_BACKOFF = 10_000;
 
     private final Context context;
     private final ReconnectionListener listener;
 
     private final Map<String, ReconnectAttempt> reconnectAttempts = new ConcurrentHashMap<>();
-    // name -> endpointId reverse lookup so we can cancel by device name
-    // (needed when peer reconnects with a NEW endpointId -- old retry loop keeps running)
     private final Map<String, String> nameToEndpointId = new ConcurrentHashMap<>();
 
-    // FIX #6: Store futures so we can cancel them explicitly on shutdown
     private final Map<String, ScheduledFuture<?>> scheduledFutures = new ConcurrentHashMap<>();
 
-    // FIX #7: Recreatable executor
     private ScheduledExecutorService executor;
     private volatile boolean isShutdown = false;
 

@@ -1,35 +1,42 @@
 import React, { useEffect, useState } from 'react';
 import { Redirect } from "expo-router";
-import { View, ActivityIndicator } from 'react-native';
 import { supabase } from "@/src/lib/supabase";
 import { ROUTES } from "@/constants/routes";
+import * as SplashScreen from 'expo-splash-screen';
 
 export default function Index() {
     const [loading, setLoading] = useState(true);
     const [session, setSession] = useState<any>(null);
 
     useEffect(() => {
-        // Initial session check
-        supabase.auth.getSession().then(({ data: { session: currentSession } }) => {
-            setSession(currentSession);
-            setLoading(false);
-        });
+        let isMounted = true;
 
-        // Listen for auth changes (login/logout)
+        const checkSession = async () => {
+            const { data: { session: currentSession } } = await supabase.auth.getSession();
+            if (isMounted) {
+                setSession(currentSession);
+                setLoading(false);
+                SplashScreen.hideAsync();
+            }
+        };
+
+        checkSession();
+
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, currentSession) => {
-            setSession(currentSession);
-            setLoading(false);
+            if (isMounted) {
+                setSession(currentSession);
+                setLoading(false);
+            }
         });
 
-        return () => subscription.unsubscribe();
+        return () => {
+            isMounted = false;
+            subscription.unsubscribe();
+        };
     }, []);
 
     if (loading) {
-        return (
-            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#141414' }}>
-                <ActivityIndicator size="large" color="#00C896" />
-            </View>
-        );
+        return null;
     }
 
     if (!session) {

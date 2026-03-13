@@ -9,8 +9,9 @@ import {
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Camera, useCameraDevice } from 'react-native-vision-camera';
-import { Q }           from '@nozbe/watermelondb';
-import { database }    from '@/src/db/database';
+import NetInfo from '@react-native-community/netinfo';
+import { Q } from '@nozbe/watermelondb';
+import { database } from '@/src/db/database';
 import { getDeviceId } from '@/src/utils/DeviceID';
 import { validateTicket, type ScanResult } from '@/src/services/ScanService';
 import {
@@ -18,116 +19,82 @@ import {
   stopListening,
   getConnectedDevices,
   type NearbyCallbacks,
-} from '@/src/services/NearbyConnectionServices';
-// NOTE: broadcastScan removed — validateTicket already calls MeshProtocol.sendScan()
-// internally. Calling broadcastScan after validateTicket was double-broadcasting.
-import type { NearbyDevice } from '@/src/native/NearbyConnections';
-import type { ScanPayload }  from '@/src/services/MeshProtocol';
-import { ROUTES }            from '@/constants/routes';
-import { styles }            from '@/src/styles/main/ScannerScreenStyles';
-import { Ticket }            from '@/src/db/models';
+} from '@/src/services/NearbyService';
+import type { NearbyDevice } from '@/src/types/Nearby.types';
+import { sendScan, type ScanPayload } from '@/src/services/MeshProtocols';
+import { ROUTES } from '@/constants/routes';
+import { styles } from '@/src/styles/main/ScannerScreenStyles';
+import { Ticket } from '@/src/db/models';
+import { ResultOverlay } from '@/src/components/ResultOverlay';
+import { OnlineStatusRow } from '@/src/components/OnlineStatusRow';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-const RESULT_DISPLAY_MS = 2500;
 
-// ─── Result Overlay ──────────────────────────────────────────────────────────
-const ResultOverlay = ({
-  result,
-  onDismiss,
-}: {
-  result:    ScanResult;
-  onDismiss: () => void;
-}) => {
-  const opacity = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.timing(opacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
-    const timer = setTimeout(() => {
-      Animated.timing(opacity, { toValue: 0, duration: 200, useNativeDriver: true }).start(() => onDismiss());
-    }, RESULT_DISPLAY_MS);
-    return () => clearTimeout(timer);
-  }, []);
-
-  const isValid = result.status === 'valid';
-  const isDup   = result.status === 'duplicate';
-  const isError = !isValid;
-
-  const bgStyle = isValid ? styles.resultValid : isDup ? styles.resultDuplicate : styles.resultInvalid;
-  const title   = isValid ? 'Ticket Valid' : isDup ? 'Ticket Already\nScanned' : 'Invalid Ticket';
-
-  return (
-    <Animated.View style={[styles.resultOverlay, bgStyle, { opacity }]}>
-      <View style={styles.resultIconWrap}>
-        {isValid ? (
-          <View style={styles.checkMark} />
-        ) : (
-          <View style={styles.crossMark}>
-            <View style={styles.crossLine1} />
-            <View style={styles.crossLine2} />
-          </View>
-        )}
-      </View>
-      <Text style={[styles.resultTitle, isError && styles.resultTitleWhite]}>{title}</Text>
-      <Text style={[styles.resultName,  isError && styles.resultNameWhite]}>{result.name}</Text>
-      <Text style={[styles.resultType,  isError && styles.resultTypeWhite]}>{result.ticketType}</Text>
-      <Text style={[styles.resultId,    isError && styles.resultIdWhite]}>#{result.ticketId}</Text>
-    </Animated.View>
-  );
-};
-
-// ─── Component ───────────────────────────────────────────────────────────────
 export default function ScannerScreen() {
   const router = useRouter();
   const { eventId, eventName } = useLocalSearchParams<{ eventId: string; eventName: string }>();
 
   const device = useCameraDevice('back');
 
-  const [hasPermission,     setHasPermission]     = useState(false);
+  const [hasPermission, setHasPermission] = useState(false);
   const [permissionChecked, setPermissionChecked] = useState(false);
-  const [scanResult,        setScanResult]         = useState<ScanResult | null>(null);
-  const [isScanning,        setIsScanning]         = useState(true);
-  const [peers,             setPeers]              = useState<NearbyDevice[]>([]);
-  const [meshStarted,       setMeshStarted]        = useState(false);
+  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [isScanning, setIsScanning] = useState(true);
+  const [peers, setPeers] = useState<NearbyDevice[]>([]);
+  const [isOnline, setIsOnline] = useState(true);
+  const [meshStarted, setMeshStarted] = useState(false);
 
   const processingRef = useRef(false);
-  const deviceIdRef   = useRef('');
+  const deviceIdRef = useRef('');
+  const mountedRef = useRef(true);
 
-  // ── Mount: camera permission + start mesh ────────────────────────────────
   useEffect(() => {
+    mountedRef.current = true;
     const status = Camera.getCameraPermissionStatus();
     setHasPermission(status === 'granted');
     setPermissionChecked(true);
 
+    const unsubNet = NetInfo.addEventListener(state => {
+      if (mountedRef.current) setIsOnline(!!state.isConnected);
+    });
+
     getDeviceId().then(id => {
+      if (!mountedRef.current) return;
       deviceIdRef.current = id;
 
       const callbacks: NearbyCallbacks = {
         onDeviceConnected: async () => {
           const devices = await getConnectedDevices();
-          setPeers(devices);
+          if (mountedRef.current) setPeers(devices);
         },
         onDeviceDisconnected: async () => {
           const devices = await getConnectedDevices();
-          setPeers(devices);
+          if (mountedRef.current) setPeers(devices);
         },
         onTicketScannedByPeer: (payload: ScanPayload) => {
-          // MeshProtocol.ScanPayload shape: { ticketId, eventId, deviceId, deviceName, gateNumber, scannedAt }
-          // Show brief "already scanned" overlay so operator knows another gate got it
-          setScanResult({
-            status:     'duplicate',
-            name:       `Gate ${payload.gateNumber}: ${payload.deviceName}`,
-            ticketType: 'Scanned by another gate',
-            ticketId:   payload.ticketId,
-          });
+          if (mountedRef.current) {
+            setScanResult({
+              status: 'duplicate',
+              name: `Gate ${payload.gateNumber}: ${payload.deviceName}`,
+              ticketType: 'Scanned by another gate',
+              ticketId: payload.ticketId,
+            });
+          }
         },
       };
 
-      startNearbyService(callbacks).then(() => setMeshStarted(true));
+      startNearbyService(callbacks).then(() => {
+        if (mountedRef.current) setMeshStarted(true);
+      });
     });
 
-    return () => { stopListening(); };
+    return () => {
+      mountedRef.current = false;
+      unsubNet();
+      stopListening();
+    };
   }, []);
 
-  // ── Camera permission ─────────────────────────────────────────────────────
   const handleRequestPermission = useCallback(async () => {
     const result = await Camera.requestCameraPermission();
     setHasPermission(result === 'granted');
@@ -136,7 +103,6 @@ export default function ScannerScreen() {
     }
   }, []);
 
-  // ── QR scan ───────────────────────────────────────────────────────────────
   const handleCodeScanned = useCallback(async (codes: any[]) => {
     if (!isScanning || processingRef.current || !codes?.length) return;
     const value = codes[0]?.value;
@@ -146,8 +112,6 @@ export default function ScannerScreen() {
     setIsScanning(false);
 
     try {
-      // validateTicket marks the ticket used, creates scan_log, AND calls
-      // MeshProtocol.sendScan() internally — no separate broadcastScan needed.
       const result = await validateTicket(value, eventId, deviceIdRef.current);
       setScanResult(result);
     } catch (err: any) {
@@ -158,48 +122,11 @@ export default function ScannerScreen() {
     }
   }, [isScanning, eventId]);
 
-  // ── Dismiss result ────────────────────────────────────────────────────────
   const handleDismissResult = useCallback(() => {
     setScanResult(null);
     setIsScanning(true);
   }, []);
 
-  // ── Demo scan ─────────────────────────────────────────────────────────────
-  const handleDemoScan = useCallback(async (type: 'valid' | 'duplicate' | 'invalid') => {
-    if (!isScanning || processingRef.current) return;
-    processingRef.current = true;
-    setIsScanning(false);
-
-    try {
-      if (type === 'invalid') {
-        setScanResult({ status: 'invalid', name: 'Unknown', ticketType: 'N/A', ticketId: '#INVALID' });
-        return;
-      }
-
-      const tickets = await database
-        .get<Ticket>('tickets')
-        .query(
-          Q.where('event_id', eventId),
-          Q.where('status', type === 'valid' ? 'valid' : 'used'),
-        )
-        .fetch();
-
-      if (tickets.length === 0) {
-        setScanResult({ status: 'invalid', name: 'No tickets found', ticketType: 'N/A', ticketId: '#DEMO' });
-        return;
-      }
-
-      // validateTicket handles mesh broadcast internally
-      const result = await validateTicket(tickets[0].ticket_id, eventId, deviceIdRef.current);
-      setScanResult(result);
-    } catch (err: any) {
-      Alert.alert('Demo Error', err?.message ?? 'Something went wrong.');
-    } finally {
-      processingRef.current = false;
-    }
-  }, [isScanning, eventId]);
-
-  // ── Permission gates ──────────────────────────────────────────────────────
   if (!permissionChecked) {
     return (
       <View style={styles.permissionWrap}>
@@ -234,7 +161,7 @@ export default function ScannerScreen() {
   }
 
   return (
-    <View style={styles.root}>
+    <SafeAreaView style={styles.root} edges={['bottom']}>
       <StatusBar barStyle="light-content" backgroundColor="#0A0A0A" />
 
       <Camera
@@ -249,38 +176,29 @@ export default function ScannerScreen() {
       />
 
       <View style={styles.overlay}>
-
-        {/* Header */}
         <View style={styles.header}>
           <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()} activeOpacity={0.7}>
             <View style={styles.backArrow} />
           </TouchableOpacity>
 
-          {meshStarted && (
-            <View style={styles.meshPill}>
-              <View style={[styles.meshDot, { backgroundColor: peers.length > 0 ? '#00C896' : '#FFA040' }]} />
-              <Text style={styles.meshText}>
-                {peers.length > 0 ? `${peers.length} Nearby` : 'Scanning...'}
-              </Text>
-            </View>
-          )}
+          <OnlineStatusRow
+            isOnline={isOnline}
+            peers={peers}
+            lastSyncedAt={null}
+          />
 
-          {/* Balance the header */}
           <View style={styles.headerBtn} />
         </View>
 
-        {/* Viewfinder */}
         <View style={styles.viewfinderWrap}>
           <View style={styles.viewfinder}>
             <View style={styles.cornerTL} />
             <View style={styles.cornerTR} />
             <View style={styles.cornerBL} />
             <View style={styles.cornerBR} />
-            <View style={styles.scanLine} />
           </View>
         </View>
 
-        {/* Bottom */}
         <View style={styles.bottomSection}>
           <TouchableOpacity
             style={styles.manualBtn}
@@ -293,26 +211,10 @@ export default function ScannerScreen() {
             <View style={styles.manualIcon} />
             <Text style={styles.manualText}>Manual Search</Text>
           </TouchableOpacity>
-
-          <Text style={styles.demoHint}>Demo: Press 1 for Valid, 2 for Duplicate, 3 for Invalid</Text>
-
-          <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
-            {(['valid', 'duplicate', 'invalid'] as const).map((type, i) => (
-              <TouchableOpacity
-                key={type}
-                onPress={() => handleDemoScan(type)}
-                style={{ backgroundColor: '#1E1E1E', paddingVertical: 8, paddingHorizontal: 16, borderRadius: 8 }}
-              >
-                <Text style={{ color: type === 'valid' ? '#6BCB77' : '#FF6B6B', fontWeight: '600' }}>
-                  {i + 1} {type.charAt(0).toUpperCase() + type.slice(1, 4)}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
         </View>
       </View>
 
       {scanResult && <ResultOverlay result={scanResult} onDismiss={handleDismissResult} />}
-    </View>
+    </SafeAreaView>
   );
 }

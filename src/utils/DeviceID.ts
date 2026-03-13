@@ -3,7 +3,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const DEVICE_ID_KEY = '@event_horizon_device_id';
 
-// Generate a random UUID v4
 function generateUUID(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
@@ -11,8 +10,6 @@ function generateUUID(): string {
     return v.toString(16);
   });
 }
-
-// Returns a stable device ID — generated once, stored in AsyncStorage
 export async function getDeviceId(): Promise<string> {
   try {
     const stored = await AsyncStorage.getItem(DEVICE_ID_KEY);
@@ -22,7 +19,6 @@ export async function getDeviceId(): Promise<string> {
     await AsyncStorage.setItem(DEVICE_ID_KEY, newId);
     return newId;
   } catch {
-    // Fallback if AsyncStorage fails
     return `${Platform.OS}-${generateUUID()}`;
   }
 }
