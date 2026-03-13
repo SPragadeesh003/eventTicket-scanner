@@ -9,10 +9,7 @@
     },
     "preview": {
       "distribution": "internal",
-      "env": {
-        "SUPABASE_URL": "secret:SUPABASE_URL",
-        "SUPABASE_PUBLIC_KEY": "secret:SUPABASE_PUBLIC_KEY"
-      }
+      "environment": "preview"
     },
     "production": {}
   },
