@@ -51,7 +51,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *  [x] ConnectionsClient.MAX_BYTES_DATA_SIZE — 32KB guard on all sendPayload calls
  *  [x] sendPayload(endpointId, payload) — single-target AND broadcast variants
  *  [x] stopAllEndpoints() — used instead of per-endpoint disconnectFromEndpoint on shutdown
- *  [x] onPayloadTransferUpdate — BYTES type is complete on onPayloadReceived; no need to wait
+ *  [x] onPayloadTransferUpdate — BYTES failure detection: 3 consecutive failures → NearbyPayloadFailed
  *  [x] STATUS_OK / STATUS_CONNECTION_REJECTED / STATUS_ERROR — all handled distinctly
  *  [x] STATUS_ENDPOINT_UNKNOWN (8013) — stale endpointId: clear + restart, not retry
  *  [x] STATUS_ALREADY_ADVERTISING / STATUS_ALREADY_DISCOVERING — non-fatal, not an error
@@ -102,6 +102,32 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
     // Guards against double-discovery and double-connection races.
     private final Set<String> connectingEndpoints = ConcurrentHashMap.newKeySet();
 
+    // ── Payload failure tracking ──────────────────────────────────────────────
+    //
+    // onPayloadTransferUpdate fires for every BYTES send attempt with a
+    // PayloadTransferUpdate.Status: SUCCESS or FAILURE.
+    //
+    // sendPayload() is fire-and-forget — it only queues the payload.
+    // Ghost SUCCESS happens when sendPayload() is accepted into the queue
+    // but the transport layer silently drops it. The real outcome appears
+    // here in onPayloadTransferUpdate.
+    //
+    // Strategy: track consecutive FAILURE callbacks per endpoint.
+    // After PAYLOAD_FAIL_THRESHOLD consecutive failures on one endpoint,
+    // emit NearbyPayloadFailed to JS — this is a faster signal (~200-600ms)
+    // than waiting for ACK timeouts (~20s) to detect a stale channel.
+    //
+    // Reset to 0 on any SUCCESS (single good send = channel still alive).
+    // Removed entirely on disconnect / stop.
+    private final Map<String, Integer> payloadFailCounts = new ConcurrentHashMap<>();
+
+    // Payload dedup: Nearby sometimes calls onPayloadReceived multiple times
+    // for the same payloadId. Cache recent IDs and drop duplicates in Java
+    // before they ever reach the JS bridge.
+    private final Map<Long, Long> seenPayloadIds = new ConcurrentHashMap<>(); // payloadId → receivedAtMs
+    private static final long PAYLOAD_DEDUP_TTL_MS = 5_000; // 5s window
+    private static final int PAYLOAD_FAIL_THRESHOLD = 3;
+
     // ── Reliability managers ──────────────────────────────────────────────────
     private PermissionsManager       permissionsManager;
     private ConnectionTimeoutManager timeoutManager;
@@ -110,14 +136,18 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
     private volatile boolean         managersInitialized = false;
 
     // ── JS event names ────────────────────────────────────────────────────────
-    private static final String EVENT_CONNECTED    = "NearbyConnected";
-    private static final String EVENT_DISCONNECTED = "NearbyDisconnected";
-    private static final String EVENT_PAYLOAD      = "NearbyPayloadReceived";
-    private static final String EVENT_STATUS       = "NearbyStatusChanged";
-    private static final String EVENT_RECONNECT    = "NearbyReconnecting";
-    private static final String EVENT_PERMISSION   = "NearbyPermissionError";
-    private static final String EVENT_DEBUG        = "NearbyDebug";
-    private static final String EVENT_DEVICE_FOUND = "NearbyDeviceFound";
+    private static final String EVENT_CONNECTED      = "NearbyConnected";
+    private static final String EVENT_DISCONNECTED   = "NearbyDisconnected";
+    private static final String EVENT_PAYLOAD        = "NearbyPayloadReceived";
+    private static final String EVENT_STATUS         = "NearbyStatusChanged";
+    private static final String EVENT_RECONNECT      = "NearbyReconnecting";
+    private static final String EVENT_PERMISSION     = "NearbyPermissionError";
+    private static final String EVENT_DEBUG          = "NearbyDebug";
+    private static final String EVENT_DEVICE_FOUND   = "NearbyDeviceFound";
+    // Emitted when PAYLOAD_FAIL_THRESHOLD consecutive send failures are detected
+    // on one endpoint. JS (NearbyConnectionServices) listens for this and
+    // calls forceReconnect() immediately — bypassing the full ACK timeout cycle.
+    private static final String EVENT_PAYLOAD_FAILED = "NearbyPayloadFailed";
 
     public NearbyConnectionsModule(ReactApplicationContext context) {
         super(context);
@@ -354,6 +384,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             connectedEndpoints.clear();
             connectingEndpoints.clear();
             pendingConnectionNames.clear();
+            payloadFailCounts.clear(); // ← clear failure counters on stop
             // Keep endpointNameCache — useful if service restarts and finds same peers
 
             emitStatus("stopped");
@@ -503,6 +534,8 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
                 reconnectionManager.clearAttempts(endpointId);
                 reconnectionManager.clearAttemptsByName(deviceName);
                 exhaustedEndpoints.remove(endpointId);
+                // Reset failure counter for this endpoint — fresh connection, clean slate
+                payloadFailCounts.put(endpointId, 0);
 
                 Log.d(TAG, "Connected: " + deviceName + " (" + connectedEndpoints.size() + " total)");
                 emitDebug("Connected to: " + deviceName);
@@ -549,6 +582,8 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             heartbeatManager.stopHeartbeatForEndpoint(endpointId);
             timeoutManager.cancelTimeout(endpointId);
             connectingEndpoints.remove(endpointId);
+            // Remove failure counter — endpoint is gone
+            payloadFailCounts.remove(endpointId);
 
             emitDisconnected(endpointId, deviceName);
             scheduleReconnection(endpointId, deviceName);
@@ -796,6 +831,11 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             }
 
             Log.d(TAG, "Broadcast done: " + successCount + " sent, " + failCount + " failed");
+            if (successCount > 0 && managersInitialized) {
+                for (String endpointId : connectedEndpoints.keySet()) {
+                    heartbeatManager.schedulePostBurstProbe(endpointId);
+                }
+            }
             promise.resolve(successCount > 0);
         } catch (Exception e) {
             Log.e(TAG, "Broadcast error: " + e.getMessage(), e);
@@ -892,11 +932,26 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
     // ─────────────────────────────────────────────────────────────────────────
     //  PAYLOAD CALLBACK
     //
-    //  From the docs:
-    //  - onPayloadReceived() is called when the FIRST BYTE is received for STREAM/FILE.
-    //    For BYTES, the ENTIRE payload is available immediately in onPayloadReceived().
-    //  - onPayloadTransferUpdate() with Status.SUCCESS signals full transfer for STREAM/FILE.
-    //  - For BYTES we don't need to wait for onPayloadTransferUpdate — data is complete.
+    //  onPayloadReceived():
+    //    For BYTES payloads, the ENTIRE payload is available immediately.
+    //    No need to wait for onPayloadTransferUpdate — data is complete on receipt.
+    //
+    //  onPayloadTransferUpdate():
+    //    For BYTES payloads on the SENDER side, this fires with either:
+    //      PayloadTransferUpdate.Status.SUCCESS — payload fully delivered
+    //      PayloadTransferUpdate.Status.FAILURE — transport dropped it (ghost SUCCESS)
+    //
+    //    Ghost SUCCESS: sendPayload() returned without exception (payload was accepted
+    //    into the send queue) but the transport layer silently dropped it. The queue
+    //    status SUCCESS is NOT the same as delivery SUCCESS. This callback tells the
+    //    true story.
+    //
+    //    We track consecutive FAILURE updates per endpoint. After PAYLOAD_FAIL_THRESHOLD
+    //    consecutive failures, we emit NearbyPayloadFailed to JS so forceReconnect()
+    //    can tear down the stale channel immediately (~200-600ms) rather than waiting
+    //    for ACK timeouts to fire (~20s).
+    //
+    //    A single SUCCESS resets the counter — the channel is still alive.
     // ─────────────────────────────────────────────────────────────────────────
     private final PayloadCallback payloadCallback = new PayloadCallback() {
 
@@ -916,6 +971,20 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
                 return;
             }
 
+            // Dedup by payloadId — Nearby can call onPayloadReceived multiple
+            // times for the same payload on some Android versions.
+            long payloadId = payload.getId();
+            long nowMs     = System.currentTimeMillis();
+
+            // Evict expired entries first
+            seenPayloadIds.entrySet().removeIf(e -> nowMs - e.getValue() > PAYLOAD_DEDUP_TTL_MS);
+
+            if (seenPayloadIds.containsKey(payloadId)) {
+                Log.w(TAG, "Duplicate payloadId " + payloadId + " — dropped");
+                return;
+            }
+            seenPayloadIds.put(payloadId, nowMs);
+
             // Real payload — decode and forward to JS
             String json = new String(data, StandardCharsets.UTF_8);
             Log.d(TAG, "Payload received from: " + endpointNameCache.getOrDefault(endpointId, endpointId)
@@ -926,9 +995,41 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         @Override
         public void onPayloadTransferUpdate(@NonNull String endpointId,
                                             @NonNull PayloadTransferUpdate update) {
-            // No-op for BYTES: the full payload is already in onPayloadReceived().
-            // This callback is important for STREAM and FILE types (progress / completion),
-            // but we do not use those payload types in this app.
+            if (isModuleDestroyed) return;
+
+            int status = update.getStatus();
+
+            if (status == PayloadTransferUpdate.Status.SUCCESS) {
+                // Channel is alive — reset the consecutive failure counter.
+                // One good delivery is enough to prove the channel works.
+                payloadFailCounts.put(endpointId, 0);
+                Log.d(TAG, "PayloadTransferUpdate SUCCESS — endpoint: "
+                    + endpointNameCache.getOrDefault(endpointId, endpointId));
+
+            } else if (status == PayloadTransferUpdate.Status.FAILURE) {
+                // Transport-level drop. sendPayload() reported no exception, but the
+                // payload never reached the peer. This is the ghost SUCCESS signal.
+                String deviceName = endpointNameCache.getOrDefault(endpointId, endpointId);
+
+                int failures = payloadFailCounts.getOrDefault(endpointId, 0) + 1;
+                payloadFailCounts.put(endpointId, failures);
+
+                Log.w(TAG, "PayloadTransferUpdate FAILURE #" + failures
+                    + " — endpoint: " + deviceName
+                    + " (threshold: " + PAYLOAD_FAIL_THRESHOLD + ")");
+
+                if (failures >= PAYLOAD_FAIL_THRESHOLD) {
+                    // Confirmed stale channel — too many consecutive drops.
+                    // Reset counter so we don't fire again immediately if reconnect
+                    // takes a moment and a stray callback fires during teardown.
+                    payloadFailCounts.put(endpointId, 0);
+
+                    Log.e(TAG, "🔴 PAYLOAD_FAIL_THRESHOLD reached for " + deviceName
+                        + " — emitting NearbyPayloadFailed to JS");
+                    emitPayloadFailed(endpointId, deviceName, failures);
+                }
+            }
+            // CANCELLED status (e.g. stream cancelled by sender) — ignore for BYTES
         }
     };
 
@@ -961,6 +1062,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         connectingEndpoints.remove(endpointId);
         heartbeatManager.stopHeartbeatForEndpoint(endpointId);
         timeoutManager.cancelTimeout(endpointId);
+        payloadFailCounts.remove(endpointId); // ← clean up on heartbeat-detected ghost
 
         emitDisconnected(endpointId, deviceName);
 
@@ -982,6 +1084,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
                 timeoutManager.cancelTimeout(endpointId);
                 reconnectionManager.clearAttempts(endpointId);
             }
+            payloadFailCounts.remove(endpointId);
             if (connectionsClient != null) {
                 connectionsClient.disconnectFromEndpoint(endpointId);
             }
@@ -1037,6 +1140,25 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         WritableMap m = Arguments.createMap();
         m.putString("message", message);
         emit(EVENT_DEBUG, m);
+    }
+
+    /**
+     * Emitted when PAYLOAD_FAIL_THRESHOLD consecutive send failures are detected
+     * on one endpoint. JS side (NearbyConnectionServices) listens for this event
+     * and calls forceReconnect() immediately — bypassing ACK timeout retries entirely.
+     *
+     * Timeline comparison:
+     *   Before this fix: ghost SUCCESS → 4s wait → retry → 6s wait → retry → 10s wait → reconnect (~20s)
+     *   After this fix:  ghost SUCCESS → 3 failed onPayloadTransferUpdate → reconnect (~200-600ms)
+     */
+    private void emitPayloadFailed(String endpointId, String deviceName, int failCount) {
+        WritableMap m = Arguments.createMap();
+        m.putString("endpointId", endpointId);
+        m.putString("deviceName", deviceName);
+        m.putInt("failCount", failCount);
+        emit(EVENT_PAYLOAD_FAILED, m);
+        Log.w(TAG, "NearbyPayloadFailed emitted for: " + deviceName
+            + " (failCount=" + failCount + ")");
     }
 
     private void emit(String event, WritableMap data) {

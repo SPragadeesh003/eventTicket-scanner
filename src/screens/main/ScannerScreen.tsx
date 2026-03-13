@@ -16,18 +16,20 @@ import { validateTicket, type ScanResult } from '@/src/services/ScanService';
 import {
   startNearbyService,
   stopListening,
-  broadcastScan,
   getConnectedDevices,
   type NearbyCallbacks,
 } from '@/src/services/NearbyConnectionServices';
+// NOTE: broadcastScan removed — validateTicket already calls MeshProtocol.sendScan()
+// internally. Calling broadcastScan after validateTicket was double-broadcasting.
 import type { NearbyDevice } from '@/src/native/NearbyConnections';
-import { ROUTES } from '@/constants/routes';
-import { styles } from '@/src/styles/main/ScannerScreenStyles';
-import { Ticket } from '@/src/db/models';
+import type { ScanPayload }  from '@/src/services/MeshProtocol';
+import { ROUTES }            from '@/constants/routes';
+import { styles }            from '@/src/styles/main/ScannerScreenStyles';
+import { Ticket }            from '@/src/db/models';
 
 const RESULT_DISPLAY_MS = 2500;
 
-// ─── Result Overlay ──────────────────────────────────────────
+// ─── Result Overlay ──────────────────────────────────────────────────────────
 const ResultOverlay = ({
   result,
   onDismiss,
@@ -72,7 +74,7 @@ const ResultOverlay = ({
   );
 };
 
-// ─── Component ───────────────────────────────────────────────
+// ─── Component ───────────────────────────────────────────────────────────────
 export default function ScannerScreen() {
   const router = useRouter();
   const { eventId, eventName } = useLocalSearchParams<{ eventId: string; eventName: string }>();
@@ -89,14 +91,12 @@ export default function ScannerScreen() {
   const processingRef = useRef(false);
   const deviceIdRef   = useRef('');
 
-  // ── Mount: check camera permission + start mesh ───────────
+  // ── Mount: camera permission + start mesh ────────────────────────────────
   useEffect(() => {
-    // Camera permission
     const status = Camera.getCameraPermissionStatus();
     setHasPermission(status === 'granted');
     setPermissionChecked(true);
 
-    // Start Nearby mesh
     getDeviceId().then(id => {
       deviceIdRef.current = id;
 
@@ -109,12 +109,13 @@ export default function ScannerScreen() {
           const devices = await getConnectedDevices();
           setPeers(devices);
         },
-        onTicketScannedByPeer: (payload) => {
-          // Show a brief result when a peer scans a ticket
+        onTicketScannedByPeer: (payload: ScanPayload) => {
+          // MeshProtocol.ScanPayload shape: { ticketId, eventId, deviceId, deviceName, gateNumber, scannedAt }
+          // Show brief "already scanned" overlay so operator knows another gate got it
           setScanResult({
             status:     'duplicate',
-            name:       `Peer: ${payload.deviceName}`,
-            ticketType: 'Scanned by another device',
+            name:       `Gate ${payload.gateNumber}: ${payload.deviceName}`,
+            ticketType: 'Scanned by another gate',
             ticketId:   payload.ticketId,
           });
         },
@@ -126,7 +127,7 @@ export default function ScannerScreen() {
     return () => { stopListening(); };
   }, []);
 
-  // ── Camera permission request ─────────────────────────────
+  // ── Camera permission ─────────────────────────────────────────────────────
   const handleRequestPermission = useCallback(async () => {
     const result = await Camera.requestCameraPermission();
     setHasPermission(result === 'granted');
@@ -135,7 +136,7 @@ export default function ScannerScreen() {
     }
   }, []);
 
-  // ── Handle QR scan ────────────────────────────────────────
+  // ── QR scan ───────────────────────────────────────────────────────────────
   const handleCodeScanned = useCallback(async (codes: any[]) => {
     if (!isScanning || processingRef.current || !codes?.length) return;
     const value = codes[0]?.value;
@@ -145,10 +146,9 @@ export default function ScannerScreen() {
     setIsScanning(false);
 
     try {
+      // validateTicket marks the ticket used, creates scan_log, AND calls
+      // MeshProtocol.sendScan() internally — no separate broadcastScan needed.
       const result = await validateTicket(value, eventId, deviceIdRef.current);
-      if (result.status === 'valid') {
-        await broadcastScan(result.ticketId, eventId);
-      }
       setScanResult(result);
     } catch (err: any) {
       Alert.alert('Scan Error', err?.message ?? 'Something went wrong.');
@@ -158,13 +158,13 @@ export default function ScannerScreen() {
     }
   }, [isScanning, eventId]);
 
-  // ── Dismiss result ────────────────────────────────────────
+  // ── Dismiss result ────────────────────────────────────────────────────────
   const handleDismissResult = useCallback(() => {
     setScanResult(null);
     setIsScanning(true);
   }, []);
 
-  // ── Demo scan ─────────────────────────────────────────────
+  // ── Demo scan ─────────────────────────────────────────────────────────────
   const handleDemoScan = useCallback(async (type: 'valid' | 'duplicate' | 'invalid') => {
     if (!isScanning || processingRef.current) return;
     processingRef.current = true;
@@ -175,6 +175,7 @@ export default function ScannerScreen() {
         setScanResult({ status: 'invalid', name: 'Unknown', ticketType: 'N/A', ticketId: '#INVALID' });
         return;
       }
+
       const tickets = await database
         .get<Ticket>('tickets')
         .query(
@@ -187,10 +188,9 @@ export default function ScannerScreen() {
         setScanResult({ status: 'invalid', name: 'No tickets found', ticketType: 'N/A', ticketId: '#DEMO' });
         return;
       }
+
+      // validateTicket handles mesh broadcast internally
       const result = await validateTicket(tickets[0].ticket_id, eventId, deviceIdRef.current);
-      if (result.status === 'valid') {
-        await broadcastScan(result.ticketId, eventId);
-      }
       setScanResult(result);
     } catch (err: any) {
       Alert.alert('Demo Error', err?.message ?? 'Something went wrong.');
@@ -199,7 +199,7 @@ export default function ScannerScreen() {
     }
   }, [isScanning, eventId]);
 
-  // ── Permission gates ──────────────────────────────────────
+  // ── Permission gates ──────────────────────────────────────────────────────
   if (!permissionChecked) {
     return (
       <View style={styles.permissionWrap}>

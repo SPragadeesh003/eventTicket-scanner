@@ -10,40 +10,43 @@ const fs   = require('fs');
 //
 // Source: https://developers.google.com/nearby/connections/android/get-started
 //
-// Each entry mirrors the exact <uses-permission> attributes from the official docs.
-// Permissions that don't apply to a given SDK version get maxSdkVersion / minSdkVersion
-// so Android's package manager ignores them on devices where they're invalid.
+// KEY FIX: ACCESS_WIFI_STATE was previously maxSdkVersion:31 which meant it was
+// ABSENT from the manifest on API 32+ devices. This caused error 8032
+// (MISSING_PERMISSION_ACCESS_WIFI_STATE) on Android 13/14 devices.
+// Fix: Remove the maxSdkVersion cap — ACCESS_WIFI_STATE is needed on ALL API levels.
 //
-// Why this matters:
-//  - BLUETOOTH / BLUETOOTH_ADMIN don't exist on API 31+ (requesting them causes a warning)
-//  - BLUETOOTH_SCAN/ADVERTISE/CONNECT don't exist before API 31 (always "denied")
-//  - NEARBY_WIFI_DEVICES doesn't exist before API 32 (WiFi Direct falls back to BLE-only)
-//  - ACCESS_FINE_LOCATION is the location grant for discovery on API 29-31 only
+// Similarly CHANGE_WIFI_STATE and network state permissions are needed on all levels.
 //
 const NEARBY_PERMISSIONS = [
-  // Legacy Bluetooth — API <= 30 only
+  // ── Legacy Bluetooth — API <= 30 only ────────────────────────────────────
   { name: 'android.permission.BLUETOOTH',       maxSdkVersion: 30 },
   { name: 'android.permission.BLUETOOTH_ADMIN', maxSdkVersion: 30 },
 
-  // Legacy location — API <= 28 (coarse), API 29-31 (fine)
+  // ── Legacy location — required for discovery on older API levels ──────────
   { name: 'android.permission.ACCESS_COARSE_LOCATION', maxSdkVersion: 28 },
   { name: 'android.permission.ACCESS_FINE_LOCATION',   minSdkVersion: 29, maxSdkVersion: 31 },
 
-  // Modern Bluetooth — API >= 31 (neverForLocation: these are NOT used to infer location)
+  // ── Modern Bluetooth — API >= 31 ─────────────────────────────────────────
+  // neverForLocation: tells Android these are NOT used to infer location.
+  // Without this flag on API 31+, the device may block WiFi Direct operations.
   { name: 'android.permission.BLUETOOTH_SCAN',      minSdkVersion: 31, neverForLocation: true },
   { name: 'android.permission.BLUETOOTH_ADVERTISE', minSdkVersion: 31, neverForLocation: true },
   { name: 'android.permission.BLUETOOTH_CONNECT',   minSdkVersion: 31 },
 
-  // WiFi state — API <= 31 (Nearby handles WiFi internally at API 32+ via NEARBY_WIFI_DEVICES)
-  { name: 'android.permission.ACCESS_WIFI_STATE',  maxSdkVersion: 31 },
-  { name: 'android.permission.CHANGE_WIFI_STATE',  maxSdkVersion: 31, neverForLocation: true },
+  // ── WiFi state — NO maxSdkVersion cap ────────────────────────────────────
+  // FIX: Previously these had maxSdkVersion:31 which caused error 8032 on
+  // Android 13/14 (API 32+). Nearby Connections needs these on ALL API levels.
+  { name: 'android.permission.ACCESS_WIFI_STATE'  },                          // ← no cap
+  { name: 'android.permission.CHANGE_WIFI_STATE',   neverForLocation: true }, // ← no cap
+
+  // ── Network state — needed for Nearby to detect transport availability ────
   { name: 'android.permission.ACCESS_NETWORK_STATE' },
   { name: 'android.permission.CHANGE_NETWORK_STATE' },
 
-  // NEARBY_WIFI_DEVICES — API >= 32
+  // ── NEARBY_WIFI_DEVICES — API >= 32 ──────────────────────────────────────
   // Replaces ACCESS_FINE_LOCATION for WiFi Direct at API 32+.
-  // Without it, Nearby silently falls back to BLE-only (~10x slower throughput).
-  // neverForLocation: tells Android this permission is NOT used to infer location.
+  // Without it, Nearby silently falls back to BLE-only (~10x slower, ~100m range limit).
+  // neverForLocation required or Android 13+ may deny WiFi Direct scan operations.
   { name: 'android.permission.NEARBY_WIFI_DEVICES', minSdkVersion: 32, neverForLocation: true },
 ];
 
@@ -57,25 +60,20 @@ function withNearbyPermissions(config) {
     }
 
     for (const perm of NEARBY_PERMISSIONS) {
-      // Avoid duplicates by name
-      const exists = manifest['uses-permission'].some(
-        (p) => p.$?.['android:name'] === perm.name
+      // Remove existing entry for this permission so we can re-add with correct attrs
+      // (handles the case where a previous build had the wrong maxSdkVersion)
+      manifest['uses-permission'] = manifest['uses-permission'].filter(
+        (p) => p.$?.['android:name'] !== perm.name
       );
-      if (exists) continue;
 
       const entry = { $: { 'android:name': perm.name } };
 
-      // Apply SDK version constraints exactly as the official docs specify
       if (perm.maxSdkVersion != null) {
         entry.$['android:maxSdkVersion'] = String(perm.maxSdkVersion);
       }
       if (perm.minSdkVersion != null) {
         entry.$['android:minSdkVersion'] = String(perm.minSdkVersion);
       }
-
-      // neverForLocation prevents Android from using these permissions to infer location.
-      // Required for BLUETOOTH_SCAN, BLUETOOTH_ADVERTISE, NEARBY_WIFI_DEVICES, CHANGE_WIFI_STATE
-      // on Android 12+ — without this flag, the device may deny WiFi Direct operations.
       if (perm.neverForLocation) {
         entry.$['android:usesPermissionFlags'] = 'neverForLocation';
       }
@@ -92,19 +90,14 @@ function withNearbyGradle(config) {
   return withAppBuildGradle(config, (mod) => {
     const gradle = mod.modResults.contents;
 
-    // 19.3.0: latest stable as of 2026.
-    // 19.1.0 had known WiFi Direct bugs on Android 13/14 (STATUS_ENDPOINT_UNKNOWN,
-    // ghost connections). 19.3.0 fixes those and adds improved BT stability.
     const dep = "implementation 'com.google.android.gms:play-services-nearby:19.3.0'";
 
     if (!gradle.includes('play-services-nearby')) {
-      // Not yet present — inject after "dependencies {"
       mod.modResults.contents = gradle.replace(
         /dependencies\s*\{/,
         `dependencies {\n    ${dep}`
       );
     } else {
-      // Already present — update version to 19.3.0 in case it's outdated
       mod.modResults.contents = gradle.replace(
         /implementation\s+'com\.google\.android\.gms:play-services-nearby:[^']+'/,
         dep
@@ -146,7 +139,6 @@ function withNearbyJavaFiles(config) {
           const src = path.join(srcDir, file);
           let content = fs.readFileSync(src, 'utf8');
 
-          // Rewrite package declaration to match the actual app package
           content = content.replace(
             /^package com\.nearbyapi;/m,
             `package ${appPackage}.nearby;`

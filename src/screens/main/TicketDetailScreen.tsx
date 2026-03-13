@@ -8,14 +8,17 @@ import {
   Alert,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { Q }           from '@nozbe/watermelondb';
-import { database }    from '@/src/db/database';
-import { getDeviceId } from '@/src/utils/DeviceID';
-import { broadcastScan } from '@/src/services/NearbyConnectionServices';
+import { Q }              from '@nozbe/watermelondb';
+import { database }       from '@/src/db/database';
+import { getDeviceId }    from '@/src/utils/DeviceID';
+import { getProfile }     from '@/src/services/ProfileService';
+import { validateTicket } from '@/src/services/ScanService';
+// NOTE: broadcastScan removed — validateTicket calls MeshProtocol.sendScan()
+// internally. No separate broadcast needed here.
 import type { Ticket, ScanLog } from '@/src/db/models';
 import { styles } from '@/src/styles/main/TicketDetailScreenStyles';
 
-// ─── Types ────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 interface TicketDetail {
   ticket_id:   string;
   name:        string;
@@ -48,7 +51,7 @@ function formatDateTime(epochMs: number): string {
   }).replace(',', '');
 }
 
-// ─── Detail Row ───────────────────────────────────────────────
+// ─── Detail Row ───────────────────────────────────────────────────────────────
 const DetailRow = ({
   icon,
   label,
@@ -71,7 +74,7 @@ const DetailRow = ({
   </View>
 );
 
-// ─── Component ───────────────────────────────────────────────
+// ─── Component ───────────────────────────────────────────────────────────────
 export default function TicketDetailScreen() {
   const router = useRouter();
   const { ticketId, eventId } = useLocalSearchParams<{
@@ -79,13 +82,11 @@ export default function TicketDetailScreen() {
     eventId:  string;
   }>();
 
-  const [ticket,    setTicket]    = useState<TicketDetail | null>(null);
-  const [scanInfo,  setScanInfo]  = useState<ScanInfo | null>(null);
-  const [loading,   setLoading]   = useState(true);
+  const [ticket,   setTicket]   = useState<TicketDetail | null>(null);
+  const [scanInfo, setScanInfo] = useState<ScanInfo | null>(null);
+  const [loading,  setLoading]  = useState(true);
 
-  useEffect(() => {
-    loadTicket();
-  }, [ticketId]);
+  useEffect(() => { loadTicket(); }, [ticketId]);
 
   const loadTicket = async () => {
     setLoading(true);
@@ -106,7 +107,6 @@ export default function TicketDetailScreen() {
         synced_at:   t.synced_at,
       });
 
-      // If already scanned, load most recent scan log
       if (t.status === 'used') {
         const logs = await database
           .get<ScanLog>('scan_logs')
@@ -123,7 +123,7 @@ export default function TicketDetailScreen() {
     }
   };
 
-  // ── Validate ticket ───────────────────────────────────────
+  // ── Validate ──────────────────────────────────────────────────────────────
   const handleValidate = async () => {
     if (!ticket) return;
 
@@ -135,42 +135,50 @@ export default function TicketDetailScreen() {
         {
           text: 'Validate',
           onPress: async () => {
-            const deviceId = await getDeviceId();
-            const now      = Date.now();
+            try {
+              // Use validateTicket (same as QR scan path) so that:
+              //  1. Duplicate/invalid guards are applied consistently
+              //  2. MeshProtocol.sendScan() is called automatically
+              //  3. scan_log is created with correct gate/device info from profile
+              const deviceId = await getDeviceId();
+              const profile  = await getProfile();
 
-            const tickets = await database
-              .get<Ticket>('tickets')
-              .query(Q.where('ticket_id', ticketId), Q.where('event_id', eventId))
-              .fetch();
+              const result = await validateTicket(
+                ticketId,
+                eventId,
+                deviceId,
+                profile?.meshName,
+                profile?.scannerNumber,
+              );
 
-            if (tickets.length === 0) return;
-
-            await database.write(async () => {
-              await tickets[0].update((t: Ticket) => { t.status = 'used'; });
-              await database.get<ScanLog>('scan_logs').create((log: ScanLog) => {
-                log.ticket_id   = ticketId;
-                log.event_id    = eventId;
-                log.device_id   = deviceId;
-                log.gate_number = 1;
-                log.device_name = `Gate-${deviceId.slice(-4).toUpperCase()}`;
-                log.scanned_at  = now;
-                log.uploaded    = false;
-                log.is_duplicate = false;
-              });
-            });
-
-            setTicket(prev => prev ? { ...prev, status: 'used' } : null);
-            setScanInfo({ scanned_at: now, device_name: `Gate-${deviceId.slice(-4).toUpperCase()}` });
-
-            // Broadcast manual validation to all nearby peers
-            await broadcastScan(ticketId, eventId);
+              if (result.status === 'valid') {
+                // Refresh local state from DB so UI reflects the change
+                setTicket(prev => prev ? { ...prev, status: 'used' } : null);
+                const logs = await database
+                  .get<ScanLog>('scan_logs')
+                  .query(Q.where('ticket_id', ticketId), Q.where('event_id', eventId))
+                  .fetch();
+                if (logs.length > 0) {
+                  const latest = logs.reduce((a, b) => a.scanned_at > b.scanned_at ? a : b);
+                  setScanInfo({ scanned_at: latest.scanned_at, device_name: latest.device_name });
+                }
+              } else if (result.status === 'duplicate') {
+                Alert.alert('Already Scanned', 'This ticket was already validated.');
+                // Refresh to show latest scan info
+                await loadTicket();
+              } else {
+                Alert.alert('Invalid Ticket', 'This ticket is not valid for this event.');
+              }
+            } catch (err: any) {
+              Alert.alert('Error', err?.message ?? 'Validation failed.');
+            }
           },
         },
       ]
     );
   };
 
-  // ── Loading / not found ───────────────────────────────────
+  // ── Loading / not found ───────────────────────────────────────────────────
   if (loading || !ticket) {
     return (
       <View style={styles.root}>
@@ -242,7 +250,6 @@ export default function TicketDetailScreen() {
             value={formatDateTime(ticket.synced_at)}
           />
 
-          {/* Scan info — only shown if ticket is used */}
           {isUsed && scanInfo && (
             <>
               <View style={styles.divider} />
