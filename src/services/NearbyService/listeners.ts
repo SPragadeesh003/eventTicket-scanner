@@ -1,5 +1,5 @@
 import { Alert } from 'react-native';
-import { NearbyEmitter, NEARBY_EVENTS, nearbyConnect } from '@/src/native/NearbyConnections';
+import { NearbyEmitter, NEARBY_EVENTS } from '@/src/native/NearbyConnections';
 import { NearbyDevice } from '@/src/types/Nearby.types';
 import { receiveMessage, onPeerConnected } from '@/src/services/MeshProtocols';
 import { 
@@ -83,22 +83,13 @@ export function attachListeners(): void {
   );
 
   newSubscriptions.push(
-    NearbyEmitter.addListener(NEARBY_EVENTS.DEVICE_FOUND, async (device: NearbyDevice) => {
+    NearbyEmitter.addListener(NEARBY_EVENTS.DEVICE_FOUND, (device: NearbyDevice) => {
       if (device.deviceName === localDeviceName) return;
       if (!discoveredPeers.find(p => p.endpointId === device.endpointId)) {
         setDiscoveredPeers([...discoveredPeers, device]);
       }
       console.log('[Nearby] Found nearby:', device.deviceName);
       callbacks.onDeviceFound?.(device);
-
-      if (!handshakeCompletedFor.has(device.deviceName)) {
-        try {
-          console.log('[Nearby] Found unconnected peer — connecting immediately:', device.deviceName);
-          await nearbyConnect(device.endpointId, device.deviceName);
-        } catch (e: any) {
-          console.warn('[Nearby] Immediate connect failed for', device.deviceName, ':', e?.message ?? e);
-        }
-      }
     })
   );
 
@@ -153,11 +144,20 @@ export function attachListeners(): void {
     )
   );
 
+  let lastPayloadFailReconnectAt = 0;
+  const PAYLOAD_FAIL_RECONNECT_COOLDOWN_MS = 10_000;
+
   newSubscriptions.push(
     NearbyEmitter.addListener(
       'NearbyPayloadFailed',
       async (event: { endpointId: string; deviceName: string; failCount: number }) => {
-        console.warn(`[Nearby] ⚡ PAYLOAD_FAILED on ${event.deviceName} (${event.failCount} fails) — immediate force reconnect`);
+        const now = Date.now();
+        if (now - lastPayloadFailReconnectAt < PAYLOAD_FAIL_RECONNECT_COOLDOWN_MS) {
+          console.warn(`[Nearby] ⚡ PAYLOAD_FAILED on ${event.deviceName} — cooldown active, skipping force reconnect`);
+          return;
+        }
+        lastPayloadFailReconnectAt = now;
+        console.warn(`[Nearby] ⚡ PAYLOAD_FAILED on ${event.deviceName} (${event.failCount} fails) — force reconnect`);
         try {
           await _registry.forceReconnect?.();
         } catch (e) {

@@ -54,7 +54,6 @@ export async function syncEventTickets(
   onProgress: (p: SyncProgress) => void,
 ): Promise<void> {
 
-
   const { count, error: countError } = await supabase
     .from('tickets')
     .select('*', { count: 'exact', head: true })
@@ -65,9 +64,9 @@ export async function syncEventTickets(
   const total = count ?? 0;
   if (total === 0) throw new Error('No tickets found for this event.');
 
-
   const ticketsCol = database.get<Ticket>('tickets');
 
+  // Clear existing tickets first
   await database.write(async () => {
     await ticketsCol.query(Q.where('event_id', eventId)).destroyAllPermanently();
   });
@@ -76,6 +75,7 @@ export async function syncEventTickets(
   let from = 0;
   const now = Date.now();
 
+  // The main download loop
   while (from < total) {
     const { data, error } = await supabase
       .from('tickets')
@@ -86,21 +86,21 @@ export async function syncEventTickets(
     if (error) throw new Error(error.message);
     if (!data || data.length === 0) break;
 
-    await database.write(async () => {
-      const creations = data.map(row =>
-        ticketsCol.prepareCreate((t: Ticket) => {
-          t._setRaw('ticket_id', row.ticket_id);
-          t._setRaw('event_id', eventId);
-          t._setRaw('name', row.name);
-          t._setRaw('ticket_type', row.ticket_type);
-          t._setRaw('status', row.status);
-          t._setRaw('synced_at', now);
-        })
-      );
+    // Prepare the creations (No database.write wrapper here yet)
+    const creations = data.map(row =>
+      ticketsCol.prepareCreate((t: Ticket) => {
+        t._setRaw('ticket_id', row.ticket_id);
+        t._setRaw('event_id', eventId);
+        t._setRaw('name', row.name);
+        t._setRaw('ticket_type', row.ticket_type);
+        t._setRaw('status', row.status);
+        t._setRaw('synced_at', now);
+      })
+    );
 
-      for (let i = 0; i < creations.length; i += 500) {
-        await database.batch(...creations.slice(i, i + 500));
-      }
+    // ✨ THE FIX: Execute the batch directly with the array. No spread operator!
+    await database.write(async () => {
+      await database.batch(creations); 
     });
 
     downloaded += data.length;
@@ -113,6 +113,7 @@ export async function syncEventTickets(
     });
   }
 
+  // Update sync metadata
   const syncedCol = database.get<SyncedEvent>('synced_events');
   const existingSync = await syncedCol.query(Q.where('event_id', eventId)).fetch();
 

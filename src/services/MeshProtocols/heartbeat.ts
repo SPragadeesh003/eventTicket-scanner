@@ -59,17 +59,16 @@ export async function sendHeartbeatPing(broadcastMessage: any): Promise<void> {
   );
 
   if (!sent) {
-    if (!heartbeatDeviceId) {
-      console.warn('[MeshProtocol] 💓 Heartbeat PING: no device ID — stopping heartbeat');
-      stopHeartbeat();
-    }
+    console.warn('[MeshProtocol] 💓 Heartbeat PING returned false — no peers, stopping heartbeat');
+    stopHeartbeat();
     return;
   }
+
   clearPongTimeout();
   const timeoutMs = activeTransportIsBLE ? PONG_TIMEOUT_MS_BLE : PONG_TIMEOUT_MS_WIFI;
   setPongTimeoutTimer(setTimeout(async () => {
     setPongTimeoutTimer(null);
-    console.warn(`[MeshProtocol] 💔 PONG timeout after ${timeoutMs}ms — channel silently dead — forcing reconnect`);
+    console.warn(`[MeshProtocol] 💔 PONG timeout after ${timeoutMs}ms — WiFi Direct group silently died — forcing reconnect`);
     stopHeartbeat();
     if (_forceReconnect) {
       try { await _forceReconnect(); }
@@ -92,20 +91,18 @@ export function applyHeartbeatRole(localDeviceId: string, peerDeviceId: string, 
 
   setHeartbeatRoleAssigned(true);
   setHeartbeatIsSender(iAmSender);
+  setPeerDeviceIdForHeartbeat(peerDeviceId); // FIX: was never set, causing stale role on reconnect
 
   if (iAmSender) {
     setHeartbeatTimer(setInterval(() => {
-      sendHeartbeatPing(broadcastPing).catch(e =>
-        console.error('[MeshProtocol] sendHeartbeatPing error:', e)
-      );
+      broadcastPing();
     }, HEARTBEAT_INTERVAL_MS));
     console.log(`[MeshProtocol] 💓 Heartbeat SENDER (my ...${localDeviceId.slice(-4)} < peer ...${peerDeviceId.slice(-4)})`);
   } else {
     setHeartbeatTimer(setInterval(() => {
       const elapsed = Date.now() - lastPongReceivedAt;
-      const threshold = HEARTBEAT_INTERVAL_MS * 4;
-      if (elapsed > threshold) {
-        console.warn(`[MeshProtocol] 💔 No PING in ${elapsed}ms (threshold ${threshold}ms) — sender died — forcing reconnect`);
+      if (elapsed > HEARTBEAT_INTERVAL_MS * 2.5) {
+        console.warn(`[MeshProtocol] 💔 No PING in ${elapsed}ms — sender died — forcing reconnect`);
         stopHeartbeat();
         if (_forceReconnect) {
           _forceReconnect().catch(e => console.error('[MeshProtocol] forceReconnect from PING watchdog:', e));
@@ -126,17 +123,12 @@ export function startHeartbeat(localDeviceId: string, peerDeviceId: string, broa
   if (!peerIsRealId) {
     setHeartbeatTimer(setInterval(() => {
       const elapsed = Date.now() - lastPongReceivedAt;
-      const threshold = HEARTBEAT_INTERVAL_MS * 4;
-      if (elapsed > threshold) {
+      if (elapsed > HEARTBEAT_INTERVAL_MS * 2.5) {
         console.warn(`[MeshProtocol] 💔 No PING/PONG in ${elapsed}ms — forcing reconnect`);
         stopHeartbeat();
         if (_forceReconnect) {
           _forceReconnect().catch(e => console.error('[MeshProtocol] forceReconnect from watchdog:', e));
         }
-        return;
-      }
-      if (heartbeatDeviceId) {
-        broadcastPing().catch(() => {});
       }
     }, HEARTBEAT_INTERVAL_MS));
     console.log(`[MeshProtocol] 💓 Heartbeat pending role assignment (peer: ${peerDeviceId})`);
