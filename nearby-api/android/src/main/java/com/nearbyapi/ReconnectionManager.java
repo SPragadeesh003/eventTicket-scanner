@@ -12,9 +12,9 @@ import java.util.concurrent.TimeUnit;
 
 public class ReconnectionManager {
     private static final String TAG = "ReconnectionMgr";
-    private static final int    MAX_RETRIES = 8;
-    private static final long   INITIAL_BACKOFF = 500; 
-    private static final long   MAX_BACKOFF = 10_000;
+    private static final int    MAX_RETRIES     = 20;
+    private static final long   INITIAL_BACKOFF = 1000;
+    private static final long   MAX_BACKOFF     = 30_000;
 
     private final Context context;
     private final ReconnectionListener listener;
@@ -39,7 +39,7 @@ public class ReconnectionManager {
         this.executor = Executors.newScheduledThreadPool(2);
     }
 
-    // FIX #7: Return a live executor, recreating if previously shut down
+    // Return a live executor, recreating if previously shut down
     private ScheduledExecutorService getExecutor() {
         if (executor == null || executor.isShutdown()) {
             Log.d(TAG, "Recreating executor after shutdown");
@@ -71,7 +71,7 @@ public class ReconnectionManager {
         long backoffMs = Math.min(MAX_BACKOFF, INITIAL_BACKOFF * (long) Math.pow(2, attempt.retryCount));
         attempt.retryCount++;
         reconnectAttempts.put(endpointId, attempt);
-        nameToEndpointId.put(endpointName, endpointId); // track for clearAttemptsByName
+        nameToEndpointId.put(endpointName, endpointId);
 
         Log.d(TAG, "Scheduling reconnect to " + endpointName
             + " (attempt " + attempt.retryCount + "/" + MAX_RETRIES
@@ -79,7 +79,6 @@ public class ReconnectionManager {
 
         listener.onReconnectScheduled(endpointId, attempt.retryCount);
 
-        // FIX #6: Store the future so shutdown() can cancel it
         ScheduledFuture<?> future = getExecutor().schedule(() -> {
             if (isShutdown) {
                 Log.w(TAG, "Skipping reconnect — manager shut down during backoff");
@@ -101,7 +100,6 @@ public class ReconnectionManager {
         ReconnectAttempt attempt = reconnectAttempts.remove(endpointId);
         if (attempt != null) nameToEndpointId.remove(attempt.endpointName);
 
-        // FIX #6: Also cancel any pending future when connection succeeds
         ScheduledFuture<?> future = scheduledFutures.remove(endpointId);
         if (future != null && !future.isDone()) {
             future.cancel(false);
@@ -111,9 +109,6 @@ public class ReconnectionManager {
         Log.d(TAG, "Cleared reconnection attempts for: " + endpointId);
     }
 
-    // Cancel all retries for a device by name regardless of endpointId.
-    // Called when a device reconnects with a NEW endpointId -- the old retry
-    // loop (keyed by old endpointId) would otherwise run to MAX_RETRIES.
     public void clearAttemptsByName(String deviceName) {
         String oldEndpointId = nameToEndpointId.remove(deviceName);
         if (oldEndpointId == null) {
@@ -134,7 +129,6 @@ public class ReconnectionManager {
         isShutdown = true;
         Log.d(TAG, "Shutting down ReconnectionManager");
 
-        // FIX #6: Cancel ALL in-flight scheduled futures
         for (Map.Entry<String, ScheduledFuture<?>> entry : scheduledFutures.entrySet()) {
             entry.getValue().cancel(false);
             Log.d(TAG, "Cancelled scheduled reconnect for: " + entry.getKey());

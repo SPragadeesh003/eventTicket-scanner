@@ -49,6 +49,8 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
     private String localDeviceName;
     private volatile boolean isModuleDestroyed = false;
     private volatile boolean isStopping = false;
+    private volatile boolean isAdvertising = false;
+    private volatile boolean isDiscovering = false;
 
     private final Map<String, String> connectedEndpoints  = new ConcurrentHashMap<>();
 
@@ -62,8 +64,8 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
 
     private final Map<String, Integer> payloadFailCounts = new ConcurrentHashMap<>();
 
-    private final Map<Long, Long> seenPayloadIds = new ConcurrentHashMap<>(); 
-    private static final long PAYLOAD_DEDUP_TTL_MS = 5_000; 
+    private final Map<Long, Long> seenPayloadIds = new ConcurrentHashMap<>();
+    private static final long PAYLOAD_DEDUP_TTL_MS = 5_000;
     private static final int PAYLOAD_FAIL_THRESHOLD = 3;
 
     private PermissionsManager       permissionsManager;
@@ -245,12 +247,17 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             ConnectionsClient clientToStop = connectionsClient;
             connectionsClient = null;
 
+            // Reset advertising/discovery guards
+            isAdvertising = false;
+            isDiscovering = false;
+
             if (clientToStop != null) {
                 try { clientToStop.stopAdvertising(); }
                 catch (Exception e) { Log.w(TAG, "stopAdvertising: " + e.getMessage()); }
 
                 try { clientToStop.stopDiscovery(); }
                 catch (Exception e) { Log.w(TAG, "stopDiscovery: " + e.getMessage()); }
+
                 try { clientToStop.stopAllEndpoints(); }
                 catch (Exception e) { Log.w(TAG, "stopAllEndpoints: " + e.getMessage()); }
             }
@@ -278,8 +285,16 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             if (promise != null) promise.reject("STOP_ERROR", e.getMessage());
         }
     }
+
     private void startAdvertisingInternal(String deviceName) {
         if (connectionsClient == null || isModuleDestroyed || isStopping) return;
+
+        // GUARD: prevent stacked retry loops
+        if (isAdvertising) {
+            Log.d(TAG, "Already advertising or retry pending — skipping duplicate call");
+            return;
+        }
+        isAdvertising = true;
 
         AdvertisingOptions options = new AdvertisingOptions.Builder()
                 .setStrategy(STRATEGY)
@@ -290,14 +305,27 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             if (!isModuleDestroyed) {
                 Log.d(TAG, "Advertising started as: " + deviceName);
                 emitDebug("Advertising started as: " + deviceName);
+                // isAdvertising stays true — we are actively advertising
             }
         }).addOnFailureListener(e -> {
             if (isModuleDestroyed) return;
+            isAdvertising = false; // reset so retry attempt can proceed
 
             if (e instanceof com.google.android.gms.common.api.ApiException) {
                 int code = ((com.google.android.gms.common.api.ApiException) e).getStatusCode();
                 if (code == ConnectionsStatusCodes.STATUS_ALREADY_ADVERTISING) {
                     Log.d(TAG, "Already advertising");
+                    isAdvertising = true; // actually is advertising
+                    return;
+                }
+                if (code == 8007) {
+                    // STATUS_RADIO_ERROR — known Nearby bug when WiFi has no internet
+                    // Retry with longer delay to avoid storm
+                    Log.w(TAG, "Advertising failed: STATUS_RADIO_ERROR (8007) — retrying in 3s");
+                    emitDebug("Advertising failed: STATUS_RADIO_ERROR — retrying in 3s");
+                    new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                        if (!isModuleDestroyed) startAdvertisingInternal(deviceName);
+                    }, 3000);
                     return;
                 }
             }
@@ -313,6 +341,13 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
     private void startDiscoveryInternal() {
         if (connectionsClient == null || isModuleDestroyed || isStopping) return;
 
+        // GUARD: prevent stacked retry loops
+        if (isDiscovering) {
+            Log.d(TAG, "Already discovering or retry pending — skipping duplicate call");
+            return;
+        }
+        isDiscovering = true;
+
         DiscoveryOptions options = new DiscoveryOptions.Builder()
                 .setStrategy(STRATEGY)
                 .build();
@@ -322,14 +357,17 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             if (!isModuleDestroyed) {
                 Log.d(TAG, "Discovery started");
                 emitDebug("Discovery started. Scanning for nearby devices...");
+                // isDiscovering stays true
             }
         }).addOnFailureListener(e -> {
             if (isModuleDestroyed) return;
+            isDiscovering = false; // reset so retry can proceed
 
             if (e instanceof com.google.android.gms.common.api.ApiException) {
                 int code = ((com.google.android.gms.common.api.ApiException) e).getStatusCode();
                 if (code == ConnectionsStatusCodes.STATUS_ALREADY_DISCOVERING) {
                     Log.d(TAG, "Already discovering");
+                    isDiscovering = true; // actually is discovering
                     return;
                 }
             }
@@ -341,6 +379,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             }, 2000);
         });
     }
+
     private final ConnectionLifecycleCallback connectionLifecycleCallback =
             new ConnectionLifecycleCallback() {
 
@@ -348,6 +387,12 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         public void onConnectionInitiated(@NonNull String endpointId,
                                           @NonNull ConnectionInfo connectionInfo) {
             if (isModuleDestroyed) return;
+
+            // Guard against null connectionsClient during forceReconnect teardown
+            if (connectionsClient == null) {
+                Log.w(TAG, "onConnectionInitiated: connectionsClient is null — ignoring");
+                return;
+            }
 
             String remoteName = connectionInfo.getEndpointName();
             Log.d(TAG, "Connection initiated: " + endpointId + " (" + remoteName + ")");
@@ -430,6 +475,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             scheduleReconnection(endpointId, deviceName);
         }
     };
+
     private final EndpointDiscoveryCallback endpointDiscoveryCallback =
             new EndpointDiscoveryCallback() {
 
@@ -453,6 +499,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             found.putString("endpointId", endpointId);
             found.putString("deviceName", remoteName);
             emit(EVENT_DEVICE_FOUND, found);
+
             if (connectedEndpoints.containsKey(endpointId)) {
                 Log.d(TAG, "Already connected to " + remoteName + " — skipping");
                 return;
@@ -485,6 +532,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             connectingEndpoints.remove(endpointId);
         }
     };
+
     @ReactMethod
     public void requestConnection(String endpointId, String endpointName, Promise promise) {
         if (isModuleDestroyed || connectionsClient == null) {
@@ -495,6 +543,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         requestConnectionInternal(endpointId, endpointName != null ? endpointName : endpointId);
         if (promise != null) promise.resolve(true);
     }
+
     private void requestConnectionInternal(String endpointId, String endpointName) {
         if (connectionsClient == null || isModuleDestroyed) return;
 
@@ -554,6 +603,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             scheduleReconnection(endpointId, endpointName);
         }
     }
+
     @ReactMethod
     public void broadcastPayload(String jsonPayload, Promise promise) {
         if (isModuleDestroyed) {
@@ -606,6 +656,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             promise.reject("BROADCAST_ERROR", e.getMessage());
         }
     }
+
     @ReactMethod
     public void sendToEndpoint(String endpointId, String jsonPayload, Promise promise) {
         if (isModuleDestroyed || connectionsClient == null) {
@@ -633,6 +684,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             promise.resolve(false);
         }
     }
+
     @ReactMethod
     public void getConnectedDevices(Promise promise) {
         if (isModuleDestroyed) {
@@ -648,6 +700,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
         }
         promise.resolve(arr);
     }
+
     @ReactMethod
     public void getDiagnostics(Promise promise) {
         if (isModuleDestroyed) {
@@ -674,6 +727,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             promise.reject("DIAGNOSTIC_ERROR", e.getMessage());
         }
     }
+
     private final PayloadCallback payloadCallback = new PayloadCallback() {
 
         @Override
@@ -730,7 +784,6 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
 
                 if (failures >= PAYLOAD_FAIL_THRESHOLD) {
                     payloadFailCounts.put(endpointId, 0);
-
                     Log.e(TAG, "🔴 PAYLOAD_FAIL_THRESHOLD reached for " + deviceName
                         + " — emitting NearbyPayloadFailed to JS");
                     emitPayloadFailed(endpointId, deviceName, failures);
@@ -738,6 +791,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             }
         }
     };
+
     private void scheduleReconnection(String endpointId, String endpointName) {
         if (isModuleDestroyed || isStopping || !managersInitialized) return;
         if (exhaustedEndpoints.contains(endpointId)) {
@@ -861,6 +915,7 @@ public class NearbyConnectionsModule extends ReactContextBaseJavaModule {
             Log.e(TAG, "Failed to emit " + event + ": " + e.getMessage());
         }
     }
+
     @ReactMethod public void addListener(String eventName) {}
     @ReactMethod public void removeListeners(Integer count) {}
 
