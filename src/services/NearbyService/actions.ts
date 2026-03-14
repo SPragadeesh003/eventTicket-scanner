@@ -161,6 +161,16 @@ export async function startNearbyService(cb: any = {}): Promise<void> {
     return;
   }
 
+  // ✅ Stagger advertising start by 0–1500ms random jitter.
+  // With 3–6 devices all calling startNearbyService at the same time
+  // (e.g. app open simultaneously at an event), they all try to claim
+  // WiFi Direct Group Owner at the same instant — causing negotiation
+  // deadlock for minutes. The jitter ensures they start at different
+  // times so one device wins Group Owner cleanly before others advertise.
+  const advertisingJitter = Math.floor(Math.random() * 1500);
+  console.log(`[Nearby] ⏱️ Advertising jitter: ${advertisingJitter}ms`);
+  await new Promise(resolve => setTimeout(resolve, advertisingJitter));
+
   await Promise.all([
     nearbyStartAdvertising(name),
     nearbyStartDiscovery(),
@@ -171,7 +181,6 @@ export async function startNearbyService(cb: any = {}): Promise<void> {
   console.log(`[Nearby] ✅ Mesh started as: ${name}`);
 
   armDiscoveryWatchdog();
-
 
   setTimeout(() => { checkForSilentReconnects(); }, 800); 
 }

@@ -91,7 +91,6 @@ export function applyHeartbeatRole(localDeviceId: string, peerDeviceId: string, 
 
   setHeartbeatRoleAssigned(true);
   setHeartbeatIsSender(iAmSender);
-  setPeerDeviceIdForHeartbeat(peerDeviceId); // FIX: was never set, causing stale role on reconnect
 
   if (iAmSender) {
     setHeartbeatTimer(setInterval(() => {
@@ -101,7 +100,7 @@ export function applyHeartbeatRole(localDeviceId: string, peerDeviceId: string, 
   } else {
     setHeartbeatTimer(setInterval(() => {
       const elapsed = Date.now() - lastPongReceivedAt;
-      if (elapsed > HEARTBEAT_INTERVAL_MS * 2.5) {
+      if (elapsed > HEARTBEAT_INTERVAL_MS * 5) {
         console.warn(`[MeshProtocol] 💔 No PING in ${elapsed}ms — sender died — forcing reconnect`);
         stopHeartbeat();
         if (_forceReconnect) {
@@ -123,7 +122,7 @@ export function startHeartbeat(localDeviceId: string, peerDeviceId: string, broa
   if (!peerIsRealId) {
     setHeartbeatTimer(setInterval(() => {
       const elapsed = Date.now() - lastPongReceivedAt;
-      if (elapsed > HEARTBEAT_INTERVAL_MS * 2.5) {
+      if (elapsed > HEARTBEAT_INTERVAL_MS * 8) {
         console.warn(`[MeshProtocol] 💔 No PING/PONG in ${elapsed}ms — forcing reconnect`);
         stopHeartbeat();
         if (_forceReconnect) {

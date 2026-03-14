@@ -16,7 +16,16 @@ import {
   isRunning,
   _registry
 } from './state';
-import { clearDiscoveryWatchdog, armDiscoveryWatchdog } from './watchdog';
+import {
+  clearDiscoveryWatchdog,
+  armDiscoveryWatchdog,
+  onEndpointDiscovered,
+  onEndpointConnected,
+} from './watchdog';
+
+// Module-level — persists across forceReconnect cycles
+let lastPayloadFailReconnectAt = 0;
+const PAYLOAD_FAIL_RECONNECT_COOLDOWN_MS = 15_000;
 
 export function attachListeners(): void {
   if (!NearbyEmitter) return;
@@ -71,6 +80,9 @@ export function attachListeners(): void {
       }
       handshakeCompletedFor.add(device.deviceName);
 
+      // ✅ NEW: clean up watchdog tracking for this endpoint
+      onEndpointConnected(device.endpointId);
+
       console.log('[Nearby] ✅ Connected:', device.deviceName);
       clearDiscoveryWatchdog();
 
@@ -79,12 +91,20 @@ export function attachListeners(): void {
       onPeerConnected(localDeviceId, device.deviceName).catch(e =>
         console.error('[Nearby] onPeerConnected error:', e)
       );
+
+      // ✅ NEW: re-arm watchdog so remaining unconnected peers (5-6 device scenario)
+      // get a connection attempt even after one peer connects successfully
+      armDiscoveryWatchdog();
     })
   );
 
   newSubscriptions.push(
     NearbyEmitter.addListener(NEARBY_EVENTS.DEVICE_FOUND, (device: NearbyDevice) => {
       if (device.deviceName === localDeviceName) return;
+
+      // ✅ NEW: record discovery time for age-based stale eviction
+      onEndpointDiscovered(device.endpointId);
+
       if (!discoveredPeers.find(p => p.endpointId === device.endpointId)) {
         setDiscoveredPeers([...discoveredPeers, device]);
       }
@@ -143,9 +163,6 @@ export function attachListeners(): void {
       }
     )
   );
-
-  let lastPayloadFailReconnectAt = 0;
-  const PAYLOAD_FAIL_RECONNECT_COOLDOWN_MS = 10_000;
 
   newSubscriptions.push(
     NearbyEmitter.addListener(
